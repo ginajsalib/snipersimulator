@@ -323,8 +323,6 @@ namespace ParametricDramDirectoryMSI
          void processFlushReqFromDramDirectory(core_id_t sender, PrL1PrL2DramDirectoryMSI::ShmemMsg* shmem_msg);
          void processWbReqFromDramDirectory(core_id_t sender, PrL1PrL2DramDirectoryMSI::ShmemMsg* shmem_msg);
 
-         // Cache Block Size
-         UInt32 getCacheBlockSize() { return m_cache_block_size; }
          MemoryManager* getMemoryManager() { return m_memory_manager; }
          ShmemPerfModel* getShmemPerfModel() { return m_shmem_perf_model; }
 
@@ -368,6 +366,7 @@ namespace ParametricDramDirectoryMSI
 
          Cache* getCache() { return m_master->m_cache; }
          Lock& getLock() { return m_master->m_cache_lock; }
+         UInt32 getCacheBlockSize() { return m_cache_block_size; }
 
          void setPrevCacheCntlrs(CacheCntlrList& prev_cache_cntlrs);
          void setNextCacheCntlr(CacheCntlr* next_cache_cntlr) { m_next_cache_cntlr = next_cache_cntlr; }
