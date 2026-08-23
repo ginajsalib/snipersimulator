@@ -38,6 +38,7 @@ public:
       HOOK_APPLICATION_ROI_BEGIN, // none                            ROI begin, always triggers
       HOOK_APPLICATION_ROI_END,   // none                            ROI end, always triggers
       HOOK_SIGUSR1,             // none                              Sniper process received SIGUSR1
+      HOOK_RECONFIGURE,         // core_id_t                         Runtime reconfiguration interval boundary reached
       HOOK_TYPES_MAX
    };
    static const char* hook_type_names[];

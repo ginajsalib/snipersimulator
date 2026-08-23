@@ -32,6 +32,10 @@ class CacheSet
       CacheBlockInfo** m_cache_block_info_array;
       char* m_blocks;
       UInt32 m_associativity;
+      // Number of ways currently power-gated "on". Always <= m_associativity (the physically
+      // allocated size, which never changes). Runtime reconfiguration adjusts this, not
+      // m_associativity, so addressing/allocation-size math elsewhere is unaffected.
+      UInt32 m_num_active_ways;
       UInt32 m_blocksize;
       Lock m_lock;
 
@@ -44,6 +48,10 @@ class CacheSet
       UInt32 getBlockSize() { return m_blocksize; }
       UInt32 getAssociativity() { return m_associativity; }
       Lock& getLock() { return m_lock; }
+
+      // Runtime reconfiguration: power-gate ways in place (physical allocation is untouched).
+      UInt32 getActiveWays() const { return m_num_active_ways; }
+      void setActiveWays(UInt32 num_active_ways) { m_num_active_ways = num_active_ways; }
 
       void read_line(UInt32 line_index, UInt32 offset, Byte *out_buff, UInt32 bytes, bool update_replacement);
       void write_line(UInt32 line_index, UInt32 offset, Byte *in_buff, UInt32 bytes, bool update_replacement);

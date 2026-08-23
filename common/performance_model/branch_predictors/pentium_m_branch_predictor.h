@@ -21,6 +21,8 @@ public:
 
    void update(bool predicted, bool actual, bool indirect, IntPtr ip, IntPtr target);
 
+   void resizeBTB(UInt64 new_entries) { m_btb.resize((UInt32)new_entries); }
+
 private:
 
    void update_pir(bool actual, IntPtr ip, IntPtr target, BranchPredictorReturnValue::BranchType branch_type);

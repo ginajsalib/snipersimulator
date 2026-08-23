@@ -23,6 +23,12 @@ public:
 
    void resetCounters();
 
+   // RF-model-driven runtime reconfiguration: resize the BTB-like structure this predictor
+   // owns, if it has one. No-op by default; overridden by predictors with a real, resizable
+   // tagged target buffer. Callers should expect a cold-start penalty next interval, since
+   // implementations are free to drop existing entries on resize.
+   virtual void resizeBTB(UInt64 new_entries) { }
+
 protected:
    void updateCounters(bool predicted, bool actual);
 

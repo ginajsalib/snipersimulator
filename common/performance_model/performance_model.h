@@ -44,6 +44,12 @@ public:
 
    static PerformanceModel *create(Core* core);
 
+   // Dispatch HOOK_RECONFIGURE for this core (RF-model-driven runtime reconfiguration)
+   void triggerReconfigHook();
+   // Public entry point for subsystems (cache controllers, branch predictors) to charge a
+   // reconfiguration transition penalty; incrementElapsedTime() itself stays protected.
+   void applyReconfigPenalty(SubsecondTime time) { incrementElapsedTime(time); }
+
    BranchPredictor *getBranchPredictor() { return m_bp; }
    BranchPredictor const* getConstBranchPredictor() const { return m_bp; }
 

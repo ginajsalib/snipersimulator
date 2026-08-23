@@ -49,6 +49,13 @@ tools/pinversion
 results/
 !results/.DO_NOT_DELETE
 
+# RF reconfiguration model: the trained model itself is ~2GB, too large to commit.
+# Copy it in manually (see tools/reconfig/rf_predict.py); the small scaler/encoder
+# companions are committed normally.
+tools/reconfig/model/*.pkl
+!tools/reconfig/model/*_scaler.pkl
+!tools/reconfig/model/*_encoder.pkl
+
 # dependencies
 boost_1_38_0
 pin_kit
