@@ -633,6 +633,35 @@ Cache::getCacheSet(UInt32 set_index)
 	return m_sets[set_index];
 }
 
+UInt32
+Cache::setActiveWays(UInt32 target_ways)
+{
+	// Find the highest way index currently in use anywhere, so we never gate off a way
+	// that still holds live data (no forced eviction/flush from a runtime resize).
+	UInt32 max_used_ways = 0;
+	for (UInt32 set_index = 0; set_index < m_num_sets; set_index++)
+	{
+		for (UInt32 way = 0; way < getAssociativity(); way++)
+		{
+			if (peekBlock(set_index, way)->isValid() && way + 1 > max_used_ways)
+				max_used_ways = way + 1;
+		}
+	}
+
+	UInt32 effective_ways = target_ways;
+	if (effective_ways < max_used_ways)
+		effective_ways = max_used_ways;
+	if (effective_ways < 1)
+		effective_ways = 1;
+	if (effective_ways > getAssociativity())
+		effective_ways = getAssociativity(); // can't enable more ways than were ever allocated
+
+	for (UInt32 set_index = 0; set_index < m_num_sets; set_index++)
+		m_sets[set_index]->setActiveWays(effective_ways);
+
+	return effective_ways;
+}
+
 void Cache::measureStats()
 {
 	uint64_t accum = 0; /* accumulate stats over all sets */

@@ -212,6 +212,8 @@
 #include "hooks_manager.h"
 #include "cache_atd.h"
 #include "shmem_perf.h"
+#include "dvfs_manager.h"
+#include "performance_model.h"
 #include <cstring>
 
 // Define to allow private L2 caches not to take the stack lock.
@@ -2970,6 +2972,52 @@ namespace ParametricDramDirectoryMSI
 	CacheCntlr::getNetworkThreadSemaphore()
 	{
 		return m_network_thread_sem;
+	}
+
+	void
+	CacheCntlr::reconfigure(UInt64 new_capacity_bytes)
+	{
+		// m_master (and the Cache/lock it owns) is shared between the master CacheCntlr and
+		// every proxy CacheCntlr for this level/group, so this is safe to call on either —
+		// no need to specifically locate the master first.
+		Cache *cache = m_master->m_cache;
+		UInt32 num_sets = cache->getNumSets();
+		UInt32 target_ways = (UInt32)(new_capacity_bytes / ((UInt64)num_sets * m_cache_block_size));
+
+		Lock &lock = m_master->m_cache_lock;
+		lock.acquire();
+		UInt32 old_ways = cache->getActiveWays();
+		UInt32 effective_ways = cache->setActiveWays(target_ways);
+		lock.release();
+
+		if (effective_ways != target_ways)
+			LOG_PRINT_WARNING("reconfigure(core %d): requested %u active ways, clamped to %u (live data in use)",
+				m_core_id, target_ways, effective_ways);
+
+		if (effective_ways != old_ways)
+		{
+			// Fixed control-plane/power-gating overhead, not a data-flush cost: shrinking
+			// never forces an eviction (see Cache::setActiveWays()), so there's nothing to
+			// write back here.
+			UInt64 penalty_cycles = Sim()->getCfg()->getIntArray("reconfig/transition_penalty_cycles", m_core_id);
+			SubsecondTime penalty = ComponentLatency(Sim()->getDvfsManager()->getCoreDomain(m_core_id), penalty_cycles).getLatency();
+			Core *core = Sim()->getCoreManager()->getCoreFromID(m_core_id);
+			if (core && core->getPerformanceModel())
+				core->getPerformanceModel()->applyReconfigPenalty(penalty);
+		}
+	}
+
+	void
+	CacheCntlr::reconfigurePrefetcher(String new_type, String configName)
+	{
+		Lock &lock = m_master->m_cache_lock;
+		lock.acquire();
+		Prefetcher *new_prefetcher = Prefetcher::createPrefetcher(new_type, configName, m_core_id, m_shared_cores);
+		Prefetcher *old_prefetcher = m_master->m_prefetcher;
+		m_master->m_prefetcher = new_prefetcher;
+		lock.release();
+
+		delete old_prefetcher;
 	}
 
 }

@@ -23,7 +23,10 @@ CacheSetPLRU::getReplacementIndex(CacheCntlr *cntlr)
 {
    // Invalidations may mess up the LRU bits
 
-   for (UInt32 i = 0; i < m_associativity; i++)
+   // Skip power-gated ways: never allocate into them. Note PLRU's tree-bit logic below
+   // assumes a full 4- or 8-way set (see the constructor's assert), so runtime
+   // reconfiguration below that associativity isn't meaningfully supported by this policy.
+   for (UInt32 i = 0; i < m_num_active_ways; i++)
    {
       if (!m_cache_block_info_array[i]->isValid())
       {

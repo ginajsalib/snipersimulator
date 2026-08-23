@@ -32,7 +32,8 @@ CacheSetSRRIP::~CacheSetSRRIP()
 UInt32
 CacheSetSRRIP::getReplacementIndex(CacheCntlr *cntlr)
 {
-   for (UInt32 i = 0; i < m_associativity; i++)
+   // Skip power-gated ways: never allocate into them
+   for (UInt32 i = 0; i < m_num_active_ways; i++)
    {
       if (!m_cache_block_info_array[i]->isValid())
       {

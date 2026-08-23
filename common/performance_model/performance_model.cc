@@ -13,6 +13,7 @@
 #include "dvfs_manager.h"
 #include "instruction_tracer.h"
 #include "dynamic_instruction.h"
+#include "hooks_manager.h"
 
 PerformanceModel* PerformanceModel::create(Core* core)
 {
@@ -348,4 +349,9 @@ void PerformanceModel::setElapsedTime(SubsecondTime time)
       // First thread to run on this core
       m_cpiStartTime += insn_cost;
    incrementIdleElapsedTime(insn_cost);
+}
+
+void PerformanceModel::triggerReconfigHook()
+{
+   Sim()->getHooksManager()->callHooks(HookType::HOOK_RECONFIGURE, (UInt64)m_core->getId());
 }

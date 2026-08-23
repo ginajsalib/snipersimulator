@@ -17,7 +17,7 @@
 
 CacheSet::CacheSet(CacheBase::cache_t cache_type,
       UInt32 associativity, UInt32 blocksize, bool is_tlb_set):
-      m_associativity(associativity), m_blocksize(blocksize), m_is_tlb_set(is_tlb_set), inserts(0), evictions(0), invalidations(0)
+      m_associativity(associativity), m_num_active_ways(associativity), m_blocksize(blocksize), m_is_tlb_set(is_tlb_set), inserts(0), evictions(0), invalidations(0)
 {
    m_cache_block_info_array = new CacheBlockInfo*[m_associativity];
    for (UInt32 i = 0; i < m_associativity; i++)
@@ -306,7 +306,12 @@ CacheSet::parsePolicyType(String policy)
 
 bool CacheSet::isValidReplacement(UInt32 index)
 {
-   if (m_cache_block_info_array[index]->getCState() == CacheState::SHARED_UPGRADING)
+   if (index >= m_num_active_ways)
+   {
+      // Way has been power-gated off by runtime reconfiguration; never a valid victim.
+      return false;
+   }
+   else if (m_cache_block_info_array[index]->getCState() == CacheState::SHARED_UPGRADING)
    {
       return false;
    }

@@ -140,6 +140,14 @@ public:
 
 	CacheSet *getCacheSet(UInt32 set_index);
 
+	// Runtime reconfiguration: power-gate ways across every set (never resizes/reallocates
+	// the underlying storage). Returns the value actually applied, which is raised above
+	// target_ways if live (valid) data currently occupies more ways than that in any set,
+	// and capped at getAssociativity() (the physically allocated size) when growing.
+	UInt32 setActiveWays(UInt32 target_ways);
+	// Active ways are uniform across sets; any set can report the current value.
+	UInt32 getActiveWays() const { return m_num_sets > 0 ? m_sets[0]->getActiveWays() : 0; }
+
 	void measureStats();
 	void markMetadata(IntPtr address, CacheBlockInfo::block_type_t blocktype);
 	

@@ -22,13 +22,14 @@ CacheSetRandom::getReplacementIndex(CacheCntlr *cntlr)
 {
    // Invalidations may mess up the LRU bits
 
-   for (UInt32 i = 0; i < m_associativity; i++)
+   // Skip power-gated ways: never allocate into them
+   for (UInt32 i = 0; i < m_num_active_ways; i++)
    {
        if (!m_cache_block_info_array[i]->isValid())
           return i;   // if there is an invalid line, use that line
    }
 
-   UInt32 index = (m_rand.next() % m_associativity);
+   UInt32 index = (m_rand.next() % m_num_active_ways);
    if (isValidReplacement(index))
    {
       return index;

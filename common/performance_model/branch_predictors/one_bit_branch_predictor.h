@@ -13,6 +13,7 @@ public:
 
    bool predict(bool indirect, IntPtr ip, IntPtr target);
    void update(bool predicted, bool actual, bool indirect, IntPtr ip, IntPtr target);
+   void resizeBTB(UInt64 new_entries);
 
 private:
    std::vector<bool> m_bits;

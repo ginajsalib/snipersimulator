@@ -30,10 +30,10 @@ CacheSetNRU::getReplacementIndex(CacheCntlr *cntlr)
 
    for (UInt32 i = 0; i < m_associativity; i++)
    {
-      if (!m_cache_block_info_array[i]->isValid())
+      if (i < m_num_active_ways && !m_cache_block_info_array[i]->isValid())
       {
          // If there is an invalid line(s) in the set, regardless of the LRU bits of other lines, we choose the first invalid line to replace
-         // Mark our newly-inserted line as recently used
+         // Mark our newly-inserted line as recently used (power-gated ways are skipped: never allocated into)
          updateReplacementIndex(i);
          return i;
       }

@@ -15,6 +15,11 @@ protected:
 
 private:
    IntervalTimer interval_timer;
+
+   // RF-model-driven runtime reconfiguration: interval-boundary tracking (core 0 only triggers)
+   bool m_reconfig_enabled;
+   UInt64 m_reconfig_interval;
+   UInt64 m_interval_insn_count;
 };
 
 #endif

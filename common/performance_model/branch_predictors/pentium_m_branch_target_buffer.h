@@ -4,9 +4,8 @@
 #include <vector>
 
 #include "branch_predictor.h"
-
-#define NUM_WAYS 4
-#define NUM_ENTRIES 512
+#include "simulator.h"
+#include "config.hpp"
 
 class PentiumMBranchTargetBuffer : BranchPredictor
 {
@@ -17,12 +16,16 @@ class PentiumMBranchTargetBuffer : BranchPredictor
    // offset = ip[3:0] (4 bits)
    // index = ip[12:4] (9 bits), 512 entries
    // tag = ip[21:13] (9 bits)
+   // NOTE: the index/tag derivation above is fixed to a 512-entry addressing scheme
+   // regardless of m_num_entries; resize() changes capacity/way count but not this
+   // addressing width.
+
    class Way
    {
    public:
-      Way()
-         : m_tag_offset(NUM_ENTRIES, 0)
-         , m_plru(NUM_ENTRIES, 0)
+      Way(UInt32 num_entries)
+         : m_tag_offset(num_entries, 0)
+         , m_plru(num_entries, 0)
       {}
 
       std::vector<UInt32> m_tag_offset; // tag and offset data
@@ -31,9 +34,25 @@ class PentiumMBranchTargetBuffer : BranchPredictor
 
 public:
    PentiumMBranchTargetBuffer()
-      : m_ways(NUM_WAYS)
-      , m_lru_use_count(0)
-   {}
+      : m_lru_use_count(0)
+   { }
+
+   void initialize(core_id_t core_id)
+   {
+        m_num_ways = static_cast<UInt32>(Sim()->getCfg()->getIntArray("perf_model/branch_predictor/num_ways", core_id));
+        m_num_entries = static_cast<UInt32>(Sim()->getCfg()->getIntArray("perf_model/branch_predictor/num_entries", core_id));
+
+        m_ways = std::vector<Way>(m_num_ways, Way(m_num_entries));
+   }
+
+   // Runtime reconfiguration: rebuild with a new entries-per-way count. This drops all
+   // existing tags (matches the "cold-start penalty next interval" expectation), same as
+   // a real BTB flush on reconfiguration.
+   void resize(UInt32 new_entries)
+   {
+      m_num_entries = new_entries;
+      m_ways = std::vector<Way>(m_num_ways, Way(m_num_entries));
+   }
 
    bool predict(bool indirect, IntPtr ip, IntPtr target)
    {
@@ -45,7 +64,7 @@ public:
       bool hit = false;
       UInt32 tag_offset = IP_TO_TAGOFF(ip);
       UInt32 index = IP_TO_INDEX(ip);
-      for (UInt32 i = 0 ; i < NUM_WAYS ; i++)
+      for (UInt32 i = 0 ; i < m_num_ways ; i++)
       {
          if (m_ways[i].m_tag_offset[index] == tag_offset)
          {
@@ -66,7 +85,7 @@ public:
 
       UInt32 tag_offset = IP_TO_TAGOFF(ip);
       UInt32 index = IP_TO_INDEX(ip);
-      for (unsigned int w = 0 ; w < NUM_WAYS ; ++w )
+      for (unsigned int w = 0 ; w < m_num_ways ; ++w )
       {
          if (m_ways[w].m_tag_offset[index] == tag_offset)
          {
@@ -91,10 +110,10 @@ public:
    }
 
 private:
+   UInt32 m_num_ways;
+   UInt32 m_num_entries;
    std::vector<Way> m_ways;
    UInt64 m_lru_use_count;
-
 };
 
 #endif /* PENTIUM_M_BRANCH_TARGET_BUFFER_H */
-

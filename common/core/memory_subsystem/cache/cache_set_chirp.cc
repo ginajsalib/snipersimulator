@@ -142,8 +142,8 @@ CacheSetCHiRP::getReplacementIndex(CacheCntlr *cntlr, UInt64 pc)
 {
    const UInt32 table_size = m_chirp_info->getTableSize();
 
-   // 1. Cold start: pick any invalid way
-   for (UInt32 i = 0; i < m_associativity; i++)
+   // 1. Cold start: pick any invalid way (skip power-gated ways: never allocate into them)
+   for (UInt32 i = 0; i < m_num_active_ways; i++)
    {
       if (!m_cache_block_info_array[i]->isValid())
       {

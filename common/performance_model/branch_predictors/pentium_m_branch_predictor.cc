@@ -8,6 +8,7 @@ PentiumMBranchPredictor::PentiumMBranchPredictor(String name, core_id_t core_id)
    , m_last_gp_hit(false)
    , m_last_lpb_hit(false)
 {
+   m_btb.initialize(core_id);
 }
 
 PentiumMBranchPredictor::~PentiumMBranchPredictor()

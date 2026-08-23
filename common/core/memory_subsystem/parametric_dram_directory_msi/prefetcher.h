@@ -11,6 +11,8 @@ class Prefetcher
    public:
       static Prefetcher* createPrefetcher(String type, String configName, core_id_t core_id, UInt32 shared_cores);
 
+      virtual ~Prefetcher() {}
+
       virtual std::vector<IntPtr> getNextAddress(IntPtr current_address, core_id_t core_id, Core::mem_op_t mem_op_type, bool cache_hit, bool prefetch_hit, IntPtr eip) = 0;
 };
 

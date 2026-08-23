@@ -402,8 +402,6 @@ namespace ParametricDramDirectoryMSI
          void processFlushReqFromDramDirectory(core_id_t sender, PrL1PrL2DramDirectoryMSI::ShmemMsg* shmem_msg);
          void processWbReqFromDramDirectory(core_id_t sender, PrL1PrL2DramDirectoryMSI::ShmemMsg* shmem_msg);
 
-         // Cache Block Size
-         UInt32 getCacheBlockSize() { return m_cache_block_size; }
          MemoryManager* getMemoryManager() { return m_memory_manager; }
          ShmemPerfModel* getShmemPerfModel() { return m_shmem_perf_model; }
 
@@ -452,6 +450,7 @@ namespace ParametricDramDirectoryMSI
 
          Cache* getCache() { return m_master->m_cache; }
          Lock& getLock() { return m_master->m_cache_lock; }
+         UInt32 getCacheBlockSize() { return m_cache_block_size; }
 
          void setPrevCacheCntlrs(CacheCntlrList& prev_cache_cntlrs);
          void setNextCacheCntlr(CacheCntlr* next_cache_cntlr) { m_next_cache_cntlr = next_cache_cntlr; }
@@ -515,6 +514,14 @@ namespace ParametricDramDirectoryMSI
 
          void enable() { m_master->m_cache->enable(); }
          void disable() { m_master->m_cache->disable(); }
+
+         // RF-model-driven runtime reconfiguration. Safe to call on either the master
+         // CacheCntlr or any proxy for this level/group — they share the same m_master.
+         // Never flushes live data: a shrink that doesn't fit is clamped to whatever's
+         // actually free (see Cache::setActiveWays()); charges a small fixed transition
+         // penalty, not a dirty-line writeback cost, since nothing is ever forcibly evicted.
+         void reconfigure(UInt64 new_capacity_bytes);
+         void reconfigurePrefetcher(String new_type, String configName);
 
          friend class CacheCntlrList;
          friend class MemoryManager;
