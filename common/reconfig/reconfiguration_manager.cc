@@ -28,6 +28,8 @@ ReconfigurationManager::ReconfigurationManager()
    : m_stats_output_path("/tmp/sniper_interval_stats.json")
    , m_config_input_path("/tmp/sniper_new_config.json")
    , m_python_script_path("tools/reconfig/rf_predict.py")
+   , m_decision_log_path("/tmp/sniper_reconfig_decisions.csv")
+   , m_interval_index(0)
    , m_have_prev(false)
 {
    for (core_id_t c = 0; c <= 1; c++)
@@ -35,6 +37,7 @@ ReconfigurationManager::ReconfigurationManager()
       m_prev[c] = CoreCounters();
       m_current_btb_entries[c] = 0;
    }
+   m_last_snapshot = IntervalSnapshot();
 }
 
 ReconfigurationManager* ReconfigurationManager::getInstance()
@@ -47,6 +50,8 @@ ReconfigurationManager* ReconfigurationManager::getInstance()
 void ReconfigurationManager::initialize()
 {
    m_python_script_path = Sim()->getCfg()->getString("reconfig/python_hook_script").c_str();
+   if (Sim()->getCfg()->hasKey("reconfig/decision_log_path"))
+      m_decision_log_path = Sim()->getCfg()->getString("reconfig/decision_log_path").c_str();
 
    m_current_btb_entries[0] = Sim()->getCfg()->getIntArray("perf_model/branch_predictor/num_entries", 0);
    m_current_btb_entries[1] = Sim()->getCfg()->getIntArray("perf_model/branch_predictor/num_entries", 1);
@@ -73,6 +78,8 @@ SInt64 ReconfigurationManager::handleReconfiguration(core_id_t core_id)
    if (!runPythonPrediction(m_python_script_path))
    {
       LOG_PRINT_WARNING("RF prediction failed, skipping reconfiguration this interval");
+      logDecision("predict_failed", NULL);
+      m_interval_index++;
       return -1;
    }
 
@@ -80,13 +87,67 @@ SInt64 ReconfigurationManager::handleReconfiguration(core_id_t core_id)
    if (!readConfigJSON(m_config_input_path, predicted))
    {
       LOG_PRINT_WARNING("Failed to read predicted config JSON, skipping reconfiguration this interval");
+      logDecision("parse_failed", NULL);
+      m_interval_index++;
       return -1;
    }
 
    applyReconfiguration(predicted);
+   logDecision("applied", &predicted);
+   m_interval_index++;
 
    LOG_PRINT("Reconfiguration completed");
    return 0;
+}
+
+void ReconfigurationManager::logDecision(const char* status, const PredictedConfig* cfg)
+{
+   bool write_header = (m_interval_index == 0);
+   FILE *f = fopen(m_decision_log_path.c_str(), write_header ? "w" : "a");
+   if (!f)
+   {
+      LOG_PRINT_WARNING("Cannot open decision log %s for writing", m_decision_log_path.c_str());
+      return;
+   }
+
+   if (write_header)
+   {
+      fprintf(f,
+         "interval,status,"
+         "ipc_core0,ipc_core1,l1_miss_rate_core0,l1_miss_rate_core1,"
+         "l2_miss_rate_core0,l2_miss_rate_core1,l3_miss_rate_core0,l3_miss_rate_core1,"
+         "branch_mpki_core0,branch_mpki_core1,"
+         "l2_core0_bytes_prev,l2_core1_bytes_prev,l3_bytes_prev,"
+         "btb_core0_entries_prev,btb_core1_entries_prev,"
+         "prefetch_core0_prev,prefetch_core1_prev,"
+         "l2_core0_bytes_new,l2_core1_bytes_new,l3_bytes_new,"
+         "btb_core0_entries_new,btb_core1_entries_new,"
+         "prefetch_core0_new,prefetch_core1_new\n");
+   }
+
+   const IntervalSnapshot &s = m_last_snapshot;
+   fprintf(f, "%llu,%s,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%llu,%llu,%llu,%llu,%llu,%s,%s,",
+      (unsigned long long)m_interval_index, status,
+      s.ipc[0], s.ipc[1], s.l1_miss_rate[0], s.l1_miss_rate[1],
+      s.l2_miss_rate[0], s.l2_miss_rate[1], s.l3_miss_rate[0], s.l3_miss_rate[1],
+      s.branch_mpki[0], s.branch_mpki[1],
+      (unsigned long long)s.l2_bytes_prev[0], (unsigned long long)s.l2_bytes_prev[1], (unsigned long long)s.l3_bytes_prev,
+      (unsigned long long)s.btb_entries_prev[0], (unsigned long long)s.btb_entries_prev[1],
+      s.prefetch_type_prev[0].c_str(), s.prefetch_type_prev[1].c_str());
+
+   if (cfg)
+   {
+      fprintf(f, "%llu,%llu,%llu,%llu,%llu,%s,%s\n",
+         (unsigned long long)cfg->l2_core0_bytes, (unsigned long long)cfg->l2_core1_bytes, (unsigned long long)cfg->l3_bytes,
+         (unsigned long long)cfg->btb_core0_entries, (unsigned long long)cfg->btb_core1_entries,
+         cfg->prefetch_core0.c_str(), cfg->prefetch_core1.c_str());
+   }
+   else
+   {
+      fprintf(f, ",,,,,,\n");
+   }
+
+   fclose(f);
 }
 
 UInt64 ReconfigurationManager::readMetric(const char* category, core_id_t core_id, const char* metric)
@@ -167,6 +228,17 @@ void ReconfigurationManager::dumpIntervalStats(const std::string& output_file)
                l3_bytes_prev = (UInt64)l3->getCache()->getActiveWays() * l3->getCache()->getNumSets() * l3->getCacheBlockSize();
          }
       }
+
+      m_last_snapshot.ipc[core_id] = ipc;
+      m_last_snapshot.l1_miss_rate[core_id] = l1_miss_rate;
+      m_last_snapshot.l2_miss_rate[core_id] = l2_miss_rate;
+      m_last_snapshot.l3_miss_rate[core_id] = l3_miss_rate;
+      m_last_snapshot.branch_mpki[core_id] = branch_mpki;
+      m_last_snapshot.l2_bytes_prev[core_id] = l2_bytes_prev;
+      m_last_snapshot.btb_entries_prev[core_id] = m_current_btb_entries[core_id];
+      m_last_snapshot.prefetch_type_prev[core_id] = m_current_prefetch_type[core_id];
+      if (core_id == 0)
+         m_last_snapshot.l3_bytes_prev = l3_bytes_prev;
 
       snprintf(buf, sizeof(buf), "\"ipc_core%d\": %f", core_id, ipc);                       fields.push_back(buf);
       snprintf(buf, sizeof(buf), "\"l1_miss_rate_core%d\": %f", core_id, l1_miss_rate);      fields.push_back(buf);

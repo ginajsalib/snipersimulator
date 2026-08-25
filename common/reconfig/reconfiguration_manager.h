@@ -17,6 +17,8 @@ private:
    std::string m_stats_output_path;
    std::string m_config_input_path;
    std::string m_python_script_path;
+   std::string m_decision_log_path;
+   UInt64 m_interval_index;
 
    // Cumulative counters as of the last interval boundary, for computing per-interval
    // deltas (stats.h's recordMetric() returns a running total, not a delta).
@@ -43,6 +45,17 @@ private:
       std::string prefetch_core0, prefetch_core1;
    };
 
+   // Pre-reconfiguration snapshot captured by dumpIntervalStats(), retained so
+   // logDecision() can pair "before" stats with the "after" (predicted) config
+   // in a single CSV row without re-reading the live objects.
+   struct IntervalSnapshot {
+      double ipc[2], l1_miss_rate[2], l2_miss_rate[2], l3_miss_rate[2], branch_mpki[2];
+      UInt64 l2_bytes_prev[2], l3_bytes_prev;
+      UInt64 btb_entries_prev[2];
+      std::string prefetch_type_prev[2];
+   };
+   IntervalSnapshot m_last_snapshot;
+
    ReconfigurationManager();
 
 public:
@@ -63,6 +76,10 @@ private:
    bool runPythonPrediction(const std::string& script_path);
    bool readConfigJSON(const std::string& config_file, PredictedConfig& out);
    void applyReconfiguration(const PredictedConfig& cfg);
+
+   // Appends one row to m_decision_log_path pairing m_last_snapshot ("before") with
+   // cfg ("after"); cfg is NULL when prediction/parsing failed and no change was applied.
+   void logDecision(const char* status, const PredictedConfig* cfg);
 
    static UInt64 readMetric(const char* category, core_id_t core_id, const char* metric);
 
