@@ -32,12 +32,7 @@ ReconfigurationManager::ReconfigurationManager()
    , m_interval_index(0)
    , m_have_prev(false)
 {
-   for (core_id_t c = 0; c <= 1; c++)
-   {
-      m_prev[c] = CoreCounters();
-      m_current_btb_entries[c] = 0;
-   }
-   m_last_snapshot = IntervalSnapshot();
+   // Per-core vectors are sized in initialize(), once getTotalCores() is available.
 }
 
 ReconfigurationManager* ReconfigurationManager::getInstance()
@@ -53,14 +48,27 @@ void ReconfigurationManager::initialize()
    if (Sim()->getCfg()->hasKey("reconfig/decision_log_path"))
       m_decision_log_path = Sim()->getCfg()->getString("reconfig/decision_log_path").c_str();
 
-   m_current_btb_entries[0] = Sim()->getCfg()->getIntArray("perf_model/branch_predictor/num_entries", 0);
-   m_current_btb_entries[1] = Sim()->getCfg()->getIntArray("perf_model/branch_predictor/num_entries", 1);
+   UInt32 total_cores = Sim()->getConfig()->getTotalCores();
+   m_prev.assign(total_cores, CoreCounters());
+   m_current_btb_entries.resize(total_cores);
+   m_current_prefetch_type.resize(total_cores);
+   m_last_snapshot.ipc.resize(total_cores);
+   m_last_snapshot.l1_miss_rate.resize(total_cores);
+   m_last_snapshot.l2_miss_rate.resize(total_cores);
+   m_last_snapshot.l3_miss_rate.resize(total_cores);
+   m_last_snapshot.branch_mpki.resize(total_cores);
+   m_last_snapshot.l2_bytes_prev.resize(total_cores);
+   m_last_snapshot.btb_entries_prev.resize(total_cores);
+   m_last_snapshot.prefetch_type_prev.resize(total_cores);
 
-   m_current_prefetch_type[0] = Sim()->getCfg()->getStringArray("perf_model/l2_cache/prefetcher", 0).c_str();
-   m_current_prefetch_type[1] = Sim()->getCfg()->getStringArray("perf_model/l2_cache/prefetcher", 1).c_str();
+   for (core_id_t c = 0; c < (core_id_t)total_cores; c++)
+   {
+      m_current_btb_entries[c] = Sim()->getCfg()->getIntArray("perf_model/branch_predictor/num_entries", c);
+      m_current_prefetch_type[c] = Sim()->getCfg()->getStringArray("perf_model/l2_cache/prefetcher", c).c_str();
+   }
 
-   LOG_PRINT("ReconfigurationManager initialized: script=%s, stats=%s, config=%s",
-      m_python_script_path.c_str(), m_stats_output_path.c_str(), m_config_input_path.c_str());
+   LOG_PRINT("ReconfigurationManager initialized: script=%s, stats=%s, config=%s, total_cores=%u",
+      m_python_script_path.c_str(), m_stats_output_path.c_str(), m_config_input_path.c_str(), total_cores);
 }
 
 SInt64 ReconfigurationManager::reconfigHookCallback(UInt64 arg, UInt64 core_id)
@@ -110,41 +118,47 @@ void ReconfigurationManager::logDecision(const char* status, const PredictedConf
       return;
    }
 
+   const IntervalSnapshot &s = m_last_snapshot;
+   UInt32 total_cores = (UInt32)s.ipc.size();
+
    if (write_header)
    {
-      fprintf(f,
-         "interval,status,"
-         "ipc_core0,ipc_core1,l1_miss_rate_core0,l1_miss_rate_core1,"
-         "l2_miss_rate_core0,l2_miss_rate_core1,l3_miss_rate_core0,l3_miss_rate_core1,"
-         "branch_mpki_core0,branch_mpki_core1,"
-         "l2_core0_bytes_prev,l2_core1_bytes_prev,l3_bytes_prev,"
-         "btb_core0_entries_prev,btb_core1_entries_prev,"
-         "prefetch_core0_prev,prefetch_core1_prev,"
-         "l2_core0_bytes_new,l2_core1_bytes_new,l3_bytes_new,"
-         "btb_core0_entries_new,btb_core1_entries_new,"
-         "prefetch_core0_new,prefetch_core1_new\n");
+      fprintf(f, "interval,status,");
+      static const char* per_core_stat_names[] = {
+         "ipc", "l1_miss_rate", "l2_miss_rate", "l3_miss_rate", "branch_mpki",
+         "l2_bytes_prev", "btb_entries_prev", "prefetch_prev",
+         "l2_bytes_new", "btb_entries_new", "prefetch_new"
+      };
+      for (size_t s_i = 0; s_i < sizeof(per_core_stat_names) / sizeof(per_core_stat_names[0]); s_i++)
+         for (core_id_t c = 0; c < (core_id_t)total_cores; c++)
+            fprintf(f, "%s_core%d,", per_core_stat_names[s_i], c);
+      fprintf(f, "l3_bytes_prev,l3_bytes_new\n");
    }
 
-   const IntervalSnapshot &s = m_last_snapshot;
-   fprintf(f, "%llu,%s,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%llu,%llu,%llu,%llu,%llu,%s,%s,",
-      (unsigned long long)m_interval_index, status,
-      s.ipc[0], s.ipc[1], s.l1_miss_rate[0], s.l1_miss_rate[1],
-      s.l2_miss_rate[0], s.l2_miss_rate[1], s.l3_miss_rate[0], s.l3_miss_rate[1],
-      s.branch_mpki[0], s.branch_mpki[1],
-      (unsigned long long)s.l2_bytes_prev[0], (unsigned long long)s.l2_bytes_prev[1], (unsigned long long)s.l3_bytes_prev,
-      (unsigned long long)s.btb_entries_prev[0], (unsigned long long)s.btb_entries_prev[1],
-      s.prefetch_type_prev[0].c_str(), s.prefetch_type_prev[1].c_str());
+   fprintf(f, "%llu,%s,", (unsigned long long)m_interval_index, status);
+   for (core_id_t c = 0; c < (core_id_t)total_cores; c++) fprintf(f, "%f,", s.ipc[c]);
+   for (core_id_t c = 0; c < (core_id_t)total_cores; c++) fprintf(f, "%f,", s.l1_miss_rate[c]);
+   for (core_id_t c = 0; c < (core_id_t)total_cores; c++) fprintf(f, "%f,", s.l2_miss_rate[c]);
+   for (core_id_t c = 0; c < (core_id_t)total_cores; c++) fprintf(f, "%f,", s.l3_miss_rate[c]);
+   for (core_id_t c = 0; c < (core_id_t)total_cores; c++) fprintf(f, "%f,", s.branch_mpki[c]);
+   for (core_id_t c = 0; c < (core_id_t)total_cores; c++) fprintf(f, "%llu,", (unsigned long long)s.l2_bytes_prev[c]);
+   for (core_id_t c = 0; c < (core_id_t)total_cores; c++) fprintf(f, "%llu,", (unsigned long long)s.btb_entries_prev[c]);
+   for (core_id_t c = 0; c < (core_id_t)total_cores; c++) fprintf(f, "%s,", s.prefetch_type_prev[c].c_str());
 
    if (cfg)
    {
-      fprintf(f, "%llu,%llu,%llu,%llu,%llu,%s,%s\n",
-         (unsigned long long)cfg->l2_core0_bytes, (unsigned long long)cfg->l2_core1_bytes, (unsigned long long)cfg->l3_bytes,
-         (unsigned long long)cfg->btb_core0_entries, (unsigned long long)cfg->btb_core1_entries,
-         cfg->prefetch_core0.c_str(), cfg->prefetch_core1.c_str());
+      for (core_id_t c = 0; c < (core_id_t)total_cores; c++)
+         fprintf(f, "%llu,", (c < (core_id_t)cfg->cores.size()) ? (unsigned long long)cfg->cores[c].l2_bytes : 0ULL);
+      for (core_id_t c = 0; c < (core_id_t)total_cores; c++)
+         fprintf(f, "%llu,", (c < (core_id_t)cfg->cores.size()) ? (unsigned long long)cfg->cores[c].btb_entries : 0ULL);
+      for (core_id_t c = 0; c < (core_id_t)total_cores; c++)
+         fprintf(f, "%s,", (c < (core_id_t)cfg->cores.size()) ? cfg->cores[c].prefetch.c_str() : "");
+      fprintf(f, "%llu,%llu\n", (unsigned long long)s.l3_bytes_prev, (unsigned long long)cfg->l3_bytes);
    }
    else
    {
-      fprintf(f, ",,,,,,\n");
+      for (core_id_t c = 0; c < (core_id_t)(3 * total_cores); c++) fprintf(f, ",");
+      fprintf(f, "%llu,\n", (unsigned long long)s.l3_bytes_prev);
    }
 
    fclose(f);
@@ -167,10 +181,11 @@ void ReconfigurationManager::dumpIntervalStats(const std::string& output_file)
       return;
    }
 
-   std::vector<std::string> fields;
-   char buf[256];
+   UInt32 total_cores = Sim()->getConfig()->getTotalCores();
+   std::vector<std::string> core_entries;
+   char buf[512];
 
-   for (core_id_t core_id = 0; core_id <= 1; core_id++)
+   for (core_id_t core_id = 0; core_id < (core_id_t)total_cores; core_id++)
    {
       Core *core = Sim()->getCoreManager()->getCoreFromID(core_id);
 
@@ -240,19 +255,14 @@ void ReconfigurationManager::dumpIntervalStats(const std::string& output_file)
       if (core_id == 0)
          m_last_snapshot.l3_bytes_prev = l3_bytes_prev;
 
-      snprintf(buf, sizeof(buf), "\"ipc_core%d\": %f", core_id, ipc);                       fields.push_back(buf);
-      snprintf(buf, sizeof(buf), "\"l1_miss_rate_core%d\": %f", core_id, l1_miss_rate);      fields.push_back(buf);
-      snprintf(buf, sizeof(buf), "\"l2_miss_rate_core%d\": %f", core_id, l2_miss_rate);      fields.push_back(buf);
-      snprintf(buf, sizeof(buf), "\"l3_miss_rate_core%d\": %f", core_id, l3_miss_rate);      fields.push_back(buf);
-      snprintf(buf, sizeof(buf), "\"branch_mpki_core%d\": %f", core_id, branch_mpki);        fields.push_back(buf);
-      snprintf(buf, sizeof(buf), "\"l2core%d_prev\": %llu", core_id, (unsigned long long)l2_bytes_prev);          fields.push_back(buf);
-      snprintf(buf, sizeof(buf), "\"btbcore%d_prev\": %llu", core_id, (unsigned long long)m_current_btb_entries[core_id]); fields.push_back(buf);
-      snprintf(buf, sizeof(buf), "\"prefetcher_core%d_prev\": \"%s\"", core_id, m_current_prefetch_type[core_id].c_str()); fields.push_back(buf);
-      if (core_id == 0)
-      {
-         snprintf(buf, sizeof(buf), "\"l3_prev\": %llu", (unsigned long long)l3_bytes_prev);
-         fields.push_back(buf);
-      }
+      snprintf(buf, sizeof(buf),
+         "{\"core_id\": %d, \"ipc\": %f, \"l1_miss_rate\": %f, \"l2_miss_rate\": %f, "
+         "\"l3_miss_rate\": %f, \"branch_mpki\": %f, \"l2_prev\": %llu, \"btb_prev\": %llu, "
+         "\"prefetcher_prev\": \"%s\"}",
+         core_id, ipc, l1_miss_rate, l2_miss_rate, l3_miss_rate, branch_mpki,
+         (unsigned long long)l2_bytes_prev, (unsigned long long)m_current_btb_entries[core_id],
+         m_current_prefetch_type[core_id].c_str());
+      core_entries.push_back(buf);
 
       prev.instructions = instructions;
       prev.elapsed_time_fs = elapsed_time_fs;
@@ -265,11 +275,12 @@ void ReconfigurationManager::dumpIntervalStats(const std::string& output_file)
       prev.l3_load_misses = l3_load_misses;
    }
 
-   fields.push_back("\"active_cores\": 2");
-
-   fprintf(f, "{\n");
-   for (size_t i = 0; i < fields.size(); i++)
-      fprintf(f, "  %s%s\n", fields[i].c_str(), (i + 1 < fields.size()) ? "," : "");
+   fprintf(f, "{\n  \"cores\": [\n");
+   for (size_t i = 0; i < core_entries.size(); i++)
+      fprintf(f, "    %s%s\n", core_entries[i].c_str(), (i + 1 < core_entries.size()) ? "," : "");
+   fprintf(f, "  ],\n");
+   fprintf(f, "  \"l3\": {\"l3_prev\": %llu},\n", (unsigned long long)m_last_snapshot.l3_bytes_prev);
+   fprintf(f, "  \"active_cores\": %u\n", total_cores);
    fprintf(f, "}\n");
 
    fclose(f);
@@ -329,6 +340,81 @@ bool ReconfigurationManager::extractJSONString(const std::string& content, const
    return true;
 }
 
+bool ReconfigurationManager::extractJSONObject(const std::string& content, const std::string& key, std::string& out)
+{
+   std::string pattern = "\"" + key + "\"";
+   size_t pos = content.find(pattern);
+   if (pos == std::string::npos)
+      return false;
+   size_t colon = content.find(':', pos + pattern.size());
+   if (colon == std::string::npos)
+      return false;
+   size_t brace_start = content.find('{', colon);
+   if (brace_start == std::string::npos)
+      return false;
+
+   int depth = 0;
+   size_t i = brace_start;
+   for (; i < content.size(); i++)
+   {
+      if (content[i] == '{')
+         depth++;
+      else if (content[i] == '}')
+      {
+         depth--;
+         if (depth == 0) { i++; break; }
+      }
+   }
+   if (depth != 0)
+      return false;
+
+   out = content.substr(brace_start, i - brace_start);
+   return true;
+}
+
+bool ReconfigurationManager::extractJSONArrayObjects(const std::string& content, const std::string& key, std::vector<std::string>& out)
+{
+   std::string pattern = "\"" + key + "\"";
+   size_t pos = content.find(pattern);
+   if (pos == std::string::npos)
+      return false;
+   size_t colon = content.find(':', pos + pattern.size());
+   if (colon == std::string::npos)
+      return false;
+   size_t bracket_start = content.find('[', colon);
+   if (bracket_start == std::string::npos)
+      return false;
+   size_t bracket_end = content.find(']', bracket_start);
+   if (bracket_end == std::string::npos)
+      return false;
+   std::string array_content = content.substr(bracket_start + 1, bracket_end - bracket_start - 1);
+
+   size_t i = 0;
+   while (i < array_content.size())
+   {
+      size_t obj_start = array_content.find('{', i);
+      if (obj_start == std::string::npos)
+         break;
+      int depth = 0;
+      size_t j = obj_start;
+      for (; j < array_content.size(); j++)
+      {
+         if (array_content[j] == '{')
+            depth++;
+         else if (array_content[j] == '}')
+         {
+            depth--;
+            if (depth == 0) { j++; break; }
+         }
+      }
+      if (depth != 0)
+         break;
+      out.push_back(array_content.substr(obj_start, j - obj_start));
+      i = j;
+   }
+   return !out.empty();
+}
+
 bool ReconfigurationManager::readConfigJSON(const std::string& config_file, PredictedConfig& out)
 {
    std::ifstream f(config_file.c_str());
@@ -343,13 +429,33 @@ bool ReconfigurationManager::readConfigJSON(const std::string& config_file, Pred
    f.close();
 
    bool ok = true;
-   ok = extractJSONNumber(content, "l2_core0", out.l2_core0_bytes) && ok;
-   ok = extractJSONNumber(content, "l2_core1", out.l2_core1_bytes) && ok;
-   ok = extractJSONNumber(content, "l3", out.l3_bytes) && ok;
-   ok = extractJSONNumber(content, "btb_core0", out.btb_core0_entries) && ok;
-   ok = extractJSONNumber(content, "btb_core1", out.btb_core1_entries) && ok;
-   ok = extractJSONString(content, "prefetch_core0", out.prefetch_core0) && ok;
-   ok = extractJSONString(content, "prefetch_core1", out.prefetch_core1) && ok;
+
+   std::vector<std::string> core_objs;
+   ok = extractJSONArrayObjects(content, "cores", core_objs) && ok;
+
+   UInt32 total_cores = Sim()->getConfig()->getTotalCores();
+   out.cores.assign(total_cores, PerCoreConfig());
+   for (size_t i = 0; i < core_objs.size(); i++)
+   {
+      UInt64 core_id_num = 0;
+      bool core_ok = extractJSONNumber(core_objs[i], "core_id", core_id_num);
+      if (!core_ok || core_id_num >= total_cores)
+      {
+         LOG_PRINT_WARNING("Predicted config JSON has a cores[] entry with missing/out-of-range core_id");
+         ok = false;
+         continue;
+      }
+      PerCoreConfig &pc = out.cores[core_id_num];
+      core_ok = extractJSONNumber(core_objs[i], "l2_bytes", pc.l2_bytes) && core_ok;
+      core_ok = extractJSONNumber(core_objs[i], "btb_entries", pc.btb_entries) && core_ok;
+      core_ok = extractJSONString(core_objs[i], "prefetch", pc.prefetch) && core_ok;
+      ok = core_ok && ok;
+   }
+
+   std::string l3_obj;
+   ok = extractJSONObject(content, "l3", l3_obj) && ok;
+   if (!l3_obj.empty())
+      ok = extractJSONNumber(l3_obj, "l3_bytes", out.l3_bytes) && ok;
 
    if (!ok)
       LOG_PRINT_WARNING("Predicted config JSON %s missing one or more required fields", config_file.c_str());
@@ -359,8 +465,12 @@ bool ReconfigurationManager::readConfigJSON(const std::string& config_file, Pred
 
 void ReconfigurationManager::applyReconfiguration(const PredictedConfig& cfg)
 {
-   for (core_id_t core_id = 0; core_id <= 1; core_id++)
+   UInt32 total_cores = Sim()->getConfig()->getTotalCores();
+   for (core_id_t core_id = 0; core_id < (core_id_t)total_cores; core_id++)
    {
+      if ((size_t)core_id >= cfg.cores.size())
+         continue;
+
       Core *core = Sim()->getCoreManager()->getCoreFromID(core_id);
       if (!core)
          continue;
@@ -373,22 +483,22 @@ void ReconfigurationManager::applyReconfiguration(const PredictedConfig& cfg)
          continue;
       }
 
-      UInt64 l2_bytes = (core_id == 0) ? cfg.l2_core0_bytes : cfg.l2_core1_bytes;
-      std::string prefetch_type = (core_id == 0) ? cfg.prefetch_core0 : cfg.prefetch_core1;
-      UInt64 btb_entries = (core_id == 0) ? cfg.btb_core0_entries : cfg.btb_core1_entries;
+      const PerCoreConfig &pc = cfg.cores[core_id];
 
       ParametricDramDirectoryMSI::CacheCntlr *l2 = mm->getCacheCntlrAt(core_id, MemComponent::L2_CACHE);
       if (l2)
       {
-         l2->reconfigure(l2_bytes);
-         l2->reconfigurePrefetcher(prefetch_type.c_str(), "l2_cache");
+         l2->reconfigure(pc.l2_bytes);
+         l2->reconfigurePrefetcher(pc.prefetch.c_str(), "l2_cache");
       }
-      m_current_prefetch_type[core_id] = prefetch_type;
+      m_current_prefetch_type[core_id] = pc.prefetch;
 
       if (core_id == 0)
       {
-         // L3 is shared across the core group; reconfiguring via core 0's controller
-         // affects every core sharing that L3 (see CacheCntlr::reconfigure()).
+         // L3 is treated as a single instance shared by every core; reconfiguring via
+         // core 0's controller affects every core sharing that L3 (see
+         // CacheCntlr::reconfigure()). Systems with multiple independent L3 domains
+         // aren't handled — see reconfiguration_manager.h.
          ParametricDramDirectoryMSI::CacheCntlr *l3 = mm->getCacheCntlrAt(core_id, MemComponent::L3_CACHE);
          if (l3)
             l3->reconfigure(cfg.l3_bytes);
@@ -396,7 +506,7 @@ void ReconfigurationManager::applyReconfiguration(const PredictedConfig& cfg)
 
       PerformanceModel *pm = core->getPerformanceModel();
       if (pm && pm->getBranchPredictor())
-         pm->getBranchPredictor()->resizeBTB(btb_entries);
-      m_current_btb_entries[core_id] = btb_entries;
+         pm->getBranchPredictor()->resizeBTB(pc.btb_entries);
+      m_current_btb_entries[core_id] = pc.btb_entries;
    }
 }

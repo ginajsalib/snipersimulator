@@ -1,9 +1,11 @@
 // Runtime reconfiguration manager - handles RF-model-driven hardware reconfigurations.
 // Registered against HOOK_RECONFIGURE (see hooks_manager.h); dispatched once per interval
 // from core 0's IntervalPerformanceModel (see interval_performance_model.cc). Dumps live
-// stats for cores 0 and 1, runs a Python RF model to predict a new configuration, and
-// applies it via CacheCntlr/BranchPredictor. Assumes a 2-core system, matching the trained
-// model's _core0/_core1-named feature/target columns.
+// stats for every core (Sim()->getConfig()->getTotalCores(), not hardcoded), runs a Python
+// RF model to predict a new configuration, and applies it via CacheCntlr/BranchPredictor.
+// L2/BTB/prefetcher are per-core; L3 is treated as a single instance shared by all cores
+// (applied via core 0's CacheCntlr, same as every other core sharing that L3 gets it) —
+// systems with multiple independent L3 domains aren't handled by this generalization.
 
 #ifndef RECONFIGURATION_MANAGER_H
 #define RECONFIGURATION_MANAGER_H
@@ -11,6 +13,7 @@
 #include "fixed_types.h"
 
 #include <string>
+#include <vector>
 
 class ReconfigurationManager {
 private:
@@ -21,7 +24,8 @@ private:
    UInt64 m_interval_index;
 
    // Cumulative counters as of the last interval boundary, for computing per-interval
-   // deltas (stats.h's recordMetric() returns a running total, not a delta).
+   // deltas (stats.h's recordMetric() returns a running total, not a delta). Indexed by
+   // core_id; sized to getTotalCores() in initialize().
    struct CoreCounters {
       UInt64 instructions;
       UInt64 elapsed_time_fs;
@@ -30,29 +34,34 @@ private:
       UInt64 l2_loads, l2_load_misses;
       UInt64 l3_loads, l3_load_misses;
    };
-   CoreCounters m_prev[2];
+   std::vector<CoreCounters> m_prev;
    bool m_have_prev;
 
    // Last-applied values that aren't otherwise queryable from the live objects
    // (Cache::getActiveWays() covers current L2/L3 capacity directly, so those aren't
-   // tracked here).
-   UInt64 m_current_btb_entries[2];
-   std::string m_current_prefetch_type[2];
+   // tracked here). Indexed by core_id.
+   std::vector<UInt64> m_current_btb_entries;
+   std::vector<std::string> m_current_prefetch_type;
 
+   struct PerCoreConfig {
+      UInt64 l2_bytes;
+      UInt64 btb_entries;
+      std::string prefetch;
+   };
    struct PredictedConfig {
-      UInt64 l2_core0_bytes, l2_core1_bytes, l3_bytes;
-      UInt64 btb_core0_entries, btb_core1_entries;
-      std::string prefetch_core0, prefetch_core1;
+      std::vector<PerCoreConfig> cores; // indexed by core_id
+      UInt64 l3_bytes;
    };
 
    // Pre-reconfiguration snapshot captured by dumpIntervalStats(), retained so
    // logDecision() can pair "before" stats with the "after" (predicted) config
-   // in a single CSV row without re-reading the live objects.
+   // in a single CSV row without re-reading the live objects. Indexed by core_id.
    struct IntervalSnapshot {
-      double ipc[2], l1_miss_rate[2], l2_miss_rate[2], l3_miss_rate[2], branch_mpki[2];
-      UInt64 l2_bytes_prev[2], l3_bytes_prev;
-      UInt64 btb_entries_prev[2];
-      std::string prefetch_type_prev[2];
+      std::vector<double> ipc, l1_miss_rate, l2_miss_rate, l3_miss_rate, branch_mpki;
+      std::vector<UInt64> l2_bytes_prev;
+      std::vector<UInt64> btb_entries_prev;
+      std::vector<std::string> prefetch_type_prev;
+      UInt64 l3_bytes_prev;
    };
    IntervalSnapshot m_last_snapshot;
 
@@ -61,7 +70,8 @@ private:
 public:
    static ReconfigurationManager* getInstance();
 
-   // Read config, seed m_current_btb_entries/m_current_prefetch_type from base config.
+   // Read config, size the per-core vectors to getTotalCores(), and seed
+   // m_current_btb_entries/m_current_prefetch_type from base config.
    void initialize();
 
    // Hook callback (static) that dispatches to the singleton instance.
@@ -83,10 +93,13 @@ private:
 
    static UInt64 readMetric(const char* category, core_id_t core_id, const char* metric);
 
-   // Minimal hand-rolled JSON scalar extraction (no JSON library is linked into this
-   // codebase). Returns false if the key isn't found.
+   // Minimal hand-rolled JSON extraction (no JSON library is linked into this codebase).
+   // Return false if the key isn't found. The Object/ArrayObjects variants return raw
+   // substrings (matched by brace depth) so the scalar extractors can be re-run on them.
    static bool extractJSONNumber(const std::string& content, const std::string& key, UInt64& out);
    static bool extractJSONString(const std::string& content, const std::string& key, std::string& out);
+   static bool extractJSONObject(const std::string& content, const std::string& key, std::string& out);
+   static bool extractJSONArrayObjects(const std::string& content, const std::string& key, std::vector<std::string>& out);
 };
 
 #endif
