@@ -23,6 +23,15 @@ private:
    std::string m_decision_log_path;
    UInt64 m_interval_index;
 
+   // Live snapshot of the currently-applied config, in sniper_config text-format, and the
+   // rolling time-marker state used to drive a McPAT partial-power run at every interval
+   // boundary (see triggerPowerSample()). "roi-begin" is the same literal marker name
+   // magic_server.cc records at ROI start, so the very first --partial window resolves
+   // exactly like a fresh powertrace.py run's would.
+   std::string m_live_config_path;
+   std::string m_prev_time_marker;
+   UInt64 m_prev_time_marker_ns;
+
    // Cumulative counters as of the last interval boundary, for computing per-interval
    // deltas (stats.h's recordMetric() returns a running total, not a delta). Indexed by
    // core_id; sized to getTotalCores() in initialize().
@@ -90,6 +99,16 @@ private:
    // Appends one row to m_decision_log_path pairing m_last_snapshot ("before") with
    // cfg ("after"); cfg is NULL when prediction/parsing failed and no change was applied.
    void logDecision(const char* status, const PredictedConfig* cfg);
+
+   // Writes the currently-live L2/L3/BTB config (post-reconfiguration, or unchanged on
+   // failure) to m_live_config_path in sniper_config text format, for McPAT's -c override.
+   void writeLiveConfigSnapshot();
+
+   // Records a named stats snapshot at the current time (mirrors what scripts/powertrace.py
+   // does from Python via sim.stats.write()) and shells out to tools/mcpat.py with
+   // --partial=<prev marker>:<this marker> -c m_live_config_path, so every McPAT power
+   // sample corresponds to exactly one reconfiguration interval.
+   void triggerPowerSample();
 
    static UInt64 readMetric(const char* category, core_id_t core_id, const char* metric);
 

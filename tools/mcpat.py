@@ -479,6 +479,7 @@ def edit_XML(statsobj, stats, cfg):
       l3_cacheBlockSize = long(sniper_config.get_config_default(cfg, 'perf_model/l3_cache/cache_block_size', 0, core))
       l3_cacheSize = long(sniper_config.get_config_default(cfg, 'perf_model/l3_cache/cache_size', 0, core))
       l3_cacheWriteBackTime = long(sniper_config.get_config_default(cfg, 'perf_model/l3_cache/writeback_time', 0, core))
+      btbEntries = long(sniper_config.get_config_default(cfg, 'perf_model/branch_predictor/num_entries', 512, core))
 
       if template[i][1]:
            #if template[i][1][1]=="cfg":
@@ -784,6 +785,14 @@ def edit_XML(statsobj, stats, cfg):
             l3conf.append(latency_l3)
             l3conf.append(1)
             template[i][0] = template[i][0] % tuple(l3conf)
+          elif template[i][1][0]=="btb_cfg":
+            # Capacity scales with perf_model/branch_predictor/num_entries; block_width(8),
+            # associativity(4), banks(1), throughput(1) and latency(3) stay fixed at their
+            # original values. Derivation (see the historical 18944-byte/512-entry baseline):
+            # (64 target + 3 type + 4 offset + 3 PLRU bits = 74 bits) * entries * 4 ways / 8
+            # bits-per-byte = 37 * entries.
+            btb_capacity = 37 * btbEntries
+            template[i][0] = template[i][0] % (btb_capacity, 8, 4, 1, 1, 3)
   return template, nuca_at_level
 #----------
 def readTemplate(ncores, num_l2s, private_l2s, num_l3s, technology_node):
@@ -1058,10 +1067,13 @@ def readTemplate(ncores, num_l2s, private_l2s, num_l3s, technology_node):
     template.append(["\t\t\t</component>",""])
     template.append(["\t\t\t<component id=\"system.core%i.BTB\" name=\"BTB\">"%iCount,""])
     template.append(["\t\t\t\t<!-- all the buffer related are optional -->",""])
-    template.append(["\t\t\t\t<param name=\"BTB_config\" value=\"18944,8,4,1, 1,3\"/>",""]) # ( (64 target + 3 type + 4 ffset + 3 PLRU bits) * 512 entries * 4 ways ) / 8 bits-per-byte = 18944 bytes; tag overheads are already taken into account; block size = 8, associativity = 4, num-of-banks = 1, throughput = 1, latency = 3
+    template.append(["\t\t\t\t<param name=\"BTB_config\" value=\"%i,%i,%i,%i, %i,%i\"/>",["btb_cfg","comb",iCount]]) # capacity derived from perf_model/branch_predictor/num_entries (see edit_XML's btb_cfg case); block size = 8, associativity = 4, num-of-banks = 1, throughput = 1, latency = 3
     template.append(["\t\t\t\t<stat name=\"read_accesses\" value=\"%i\"/>",["BTB.read_accesses","stat",iCount]])
     template.append(["\t\t\t\t<stat name=\"write_accesses\" value=\"0\"/>",""])
     template.append(["\t\t\t\t<!-- the parameters are capacity,block_width,associativity,bank, throughput w.r.t. core clock, latency w.r.t. core clock,-->",""])
+    # NOTE: prefetcher type isn't modeled here — this McPAT version has no XML parameter for a
+    # configurable hardware prefetcher engine. Prefetcher type per interval is still available
+    # in the reconfig CSV decision log for qualitative correlation, not as a McPAT power input.
     template.append(["\t\t\t</component>",""])
     template.append(["\t</component>",""])
     template.append(["\t\t\t<!--**********************************************************************-->",""])

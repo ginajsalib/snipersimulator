@@ -30,6 +30,9 @@ ReconfigurationManager::ReconfigurationManager()
    , m_python_script_path("tools/reconfig/rf_predict.py")
    , m_decision_log_path("/tmp/sniper_reconfig_decisions.csv")
    , m_interval_index(0)
+   , m_live_config_path("/tmp/sniper_reconfig_live.cfg")
+   , m_prev_time_marker("roi-begin")
+   , m_prev_time_marker_ns(0)
    , m_have_prev(false)
 {
    // Per-core vectors are sized in initialize(), once getTotalCores() is available.
@@ -47,6 +50,8 @@ void ReconfigurationManager::initialize()
    m_python_script_path = Sim()->getCfg()->getString("reconfig/python_hook_script").c_str();
    if (Sim()->getCfg()->hasKey("reconfig/decision_log_path"))
       m_decision_log_path = Sim()->getCfg()->getString("reconfig/decision_log_path").c_str();
+   if (Sim()->getCfg()->hasKey("reconfig/live_config_path"))
+      m_live_config_path = Sim()->getCfg()->getString("reconfig/live_config_path").c_str();
 
    UInt32 total_cores = Sim()->getConfig()->getTotalCores();
    m_prev.assign(total_cores, CoreCounters());
@@ -87,6 +92,8 @@ SInt64 ReconfigurationManager::handleReconfiguration(core_id_t core_id)
    {
       LOG_PRINT_WARNING("RF prediction failed, skipping reconfiguration this interval");
       logDecision("predict_failed", NULL);
+      writeLiveConfigSnapshot();
+      triggerPowerSample();
       m_interval_index++;
       return -1;
    }
@@ -96,12 +103,16 @@ SInt64 ReconfigurationManager::handleReconfiguration(core_id_t core_id)
    {
       LOG_PRINT_WARNING("Failed to read predicted config JSON, skipping reconfiguration this interval");
       logDecision("parse_failed", NULL);
+      writeLiveConfigSnapshot();
+      triggerPowerSample();
       m_interval_index++;
       return -1;
    }
 
    applyReconfiguration(predicted);
    logDecision("applied", &predicted);
+   writeLiveConfigSnapshot();
+   triggerPowerSample();
    m_interval_index++;
 
    LOG_PRINT("Reconfiguration completed");
@@ -162,6 +173,93 @@ void ReconfigurationManager::logDecision(const char* status, const PredictedConf
    }
 
    fclose(f);
+}
+
+void ReconfigurationManager::writeLiveConfigSnapshot()
+{
+   UInt32 total_cores = Sim()->getConfig()->getTotalCores();
+   std::vector<UInt64> l2_bytes(total_cores, 0), l2_ways(total_cores, 0);
+   UInt64 l3_bytes = 0, l3_ways = 0;
+
+   for (core_id_t core_id = 0; core_id < (core_id_t)total_cores; core_id++)
+   {
+      Core *core = Sim()->getCoreManager()->getCoreFromID(core_id);
+      ParametricDramDirectoryMSI::MemoryManager *mm = core
+         ? dynamic_cast<ParametricDramDirectoryMSI::MemoryManager*>(core->getMemoryManager())
+         : NULL;
+      if (!mm)
+         continue;
+
+      ParametricDramDirectoryMSI::CacheCntlr *l2 = mm->getCacheCntlrAt(core_id, MemComponent::L2_CACHE);
+      if (l2 && l2->getCache())
+      {
+         l2_ways[core_id] = l2->getCache()->getActiveWays();
+         l2_bytes[core_id] = l2_ways[core_id] * l2->getCache()->getNumSets() * l2->getCacheBlockSize();
+      }
+
+      if (core_id == 0)
+      {
+         ParametricDramDirectoryMSI::CacheCntlr *l3 = mm->getCacheCntlrAt(core_id, MemComponent::L3_CACHE);
+         if (l3 && l3->getCache())
+         {
+            l3_ways = l3->getCache()->getActiveWays();
+            l3_bytes = l3_ways * l3->getCache()->getNumSets() * l3->getCacheBlockSize();
+         }
+      }
+   }
+
+   FILE *f = fopen(m_live_config_path.c_str(), "w");
+   if (!f)
+   {
+      LOG_PRINT_WARNING("Cannot open live-config snapshot %s for writing", m_live_config_path.c_str());
+      return;
+   }
+
+   fprintf(f, "[perf_model/l2_cache]\n");
+   fprintf(f, "cache_size[] = ");
+   for (core_id_t c = 0; c < (core_id_t)total_cores; c++)
+      fprintf(f, "%s%llu", c ? "," : "", (unsigned long long)(l2_bytes[c] / 1024));
+   fprintf(f, "\nassociativity[] = ");
+   for (core_id_t c = 0; c < (core_id_t)total_cores; c++)
+      fprintf(f, "%s%llu", c ? "," : "", (unsigned long long)l2_ways[c]);
+
+   fprintf(f, "\n\n[perf_model/l3_cache]\n");
+   fprintf(f, "cache_size = %llu\n", (unsigned long long)(l3_bytes / 1024));
+   fprintf(f, "associativity = %llu\n", (unsigned long long)l3_ways);
+
+   fprintf(f, "\n[perf_model/branch_predictor]\n");
+   fprintf(f, "num_entries[] = ");
+   for (core_id_t c = 0; c < (core_id_t)total_cores; c++)
+      fprintf(f, "%s%llu", c ? "," : "", (unsigned long long)m_current_btb_entries[c]);
+   fprintf(f, "\n");
+
+   fclose(f);
+}
+
+void ReconfigurationManager::triggerPowerSample()
+{
+   UInt64 elapsed_fs = m_prev.empty() ? 0 : m_prev[0].elapsed_time_fs;
+   UInt64 now_ns = elapsed_fs / 1000000ULL;
+
+   char marker_buf[32];
+   snprintf(marker_buf, sizeof(marker_buf), "%llu", (unsigned long long)now_ns);
+   std::string this_marker(marker_buf);
+
+   Sim()->getStatsManager()->recordStats(this_marker.c_str());
+
+   std::string output_dir = Sim()->getCfg()->getString("general/output_dir").c_str();
+   UInt64 duration_ns = now_ns - m_prev_time_marker_ns;
+
+   char cmd[2048];
+   snprintf(cmd, sizeof(cmd),
+      "python2 tools/mcpat.py -d %s -o %s/power-%s-%s-%llu -c %s --partial=%s:%s --no-graph",
+      output_dir.c_str(), output_dir.c_str(), m_prev_time_marker.c_str(), this_marker.c_str(),
+      (unsigned long long)duration_ns, m_live_config_path.c_str(),
+      m_prev_time_marker.c_str(), this_marker.c_str());
+   system(cmd);
+
+   m_prev_time_marker = this_marker;
+   m_prev_time_marker_ns = now_ns;
 }
 
 UInt64 ReconfigurationManager::readMetric(const char* category, core_id_t core_id, const char* metric)

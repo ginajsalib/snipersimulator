@@ -156,6 +156,8 @@ num_entries = 512  # PentiumMBranchTargetBuffer entries per way (type=pentium_m 
 enabled = false
 interval_instructions = 1000000
 python_hook_script = tools/reconfig/rf_predict.py
+decision_log_path = /tmp/sniper_reconfig_decisions.csv
+live_config_path = /tmp/sniper_reconfig_live.cfg
 transition_penalty_model = fixed
 transition_penalty_cycles = 100
 ```
@@ -179,6 +181,39 @@ transition_penalty_cycles = 100
   the real model was out of scope since a trained model already exists.
 - **`model/`**: holds the real model + scaler + prefetcher encoders. The model `.pkl`
   itself (~2GB) is gitignored; the small companions are committed.
+
+---
+
+## McPAT power-model integration
+
+Without this, McPAT's power/area numbers reflected the un-reconfigured baseline hardware for
+the entire run: `tools/mcpat.py`'s `edit_XML()` reads cache size/associativity from a static
+one-time dump of `base.cfg`, never updated mid-run, and BTB capacity was a hardcoded XML
+literal (`"18944,8,4,1, 1,3"`), not even config-driven.
+
+- **`ReconfigurationManager::writeLiveConfigSnapshot()`**: writes the currently-live
+  L2/L3 size+associativity (from the same `Cache::getActiveWays()`/`getNumSets()`/
+  `getCacheBlockSize()` query `dumpIntervalStats()` already does) and per-core BTB entries to
+  `reconfig/live_config_path`, in plain `sniper_config` text format, every interval (including
+  on prediction/parse failure, so it always reflects genuinely-live state).
+- **`ReconfigurationManager::triggerPowerSample()`**: calls
+  `StatsManager::recordStats(<time-marker>)` (the C++ equivalent of what
+  `scripts/powertrace.py` does from Python via `sim.stats.write()`) and shells out to
+  `tools/mcpat.py -c <live_config_path> --partial=<prev>:<this> --no-graph`, writing
+  `power-<t0>-<t1>-<duration>.txt`/`.xml` into the run's normal output dir -- the same
+  filename convention `powertrace.py` uses, so output is a drop-in analog. Both are called at
+  the end of `handleReconfiguration()`, so every McPAT sample corresponds to exactly one
+  reconfiguration interval (no independent timer to drift out of sync with
+  `reconfig/interval_instructions` -- `scripts/powertrace.py`'s own timer-driven sampling is
+  unrelated and shouldn't be enabled at the same time as `reconfig/enabled=true`, since both
+  would write overlapping `power-*` files).
+- **`tools/mcpat.py`**: `BTB_config`'s capacity term is now computed from
+  `perf_model/branch_predictor/num_entries` (`37 * entries`, derived from the original
+  18944-byte/512-entry/4-way baseline) instead of hardcoded; block_width/associativity/
+  banks/throughput/latency stay fixed.
+- **Known gap**: prefetcher type isn't power-modeled at all -- this McPAT version has no XML
+  parameter for a configurable prefetcher engine. It stays available in the CSV decision log
+  for qualitative correlation only.
 
 ---
 
