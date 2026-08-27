@@ -184,6 +184,33 @@ transition_penalty_cycles = 100
 
 ---
 
+## CentOS 6 host/container bridge (`.reconfig_bridge_shim.sh` / `.reconfig_bridge_watch.py`)
+
+The CentOS 6 container's Python can't run the real RF model at all (old glibc has no
+compatible sklearn wheel, and its python3.6 can't unpickle a model saved with sklearn
+1.9.0 either). Rather than fighting that, `rf_predict.py` runs unmodified on the **host**,
+which already has a close-enough sklearn, via a small file-based request/response handoff
+through a directory that's already bind-mounted into the container -- no extra mount or
+container restart needed.
+
+- **`.reconfig_bridge_shim.sh`**: set as `reconfig/python_hook_script` for container runs
+  (in place of `tools/reconfig/rf_predict.py` directly). Drops the stats file into
+  `.reconfig_bridge/stats_request.json` + a `.ready` flag, then polls (0.1s/30s timeout)
+  for a `config_response.json` + `.ready` pair and copies it back to
+  `/tmp/sniper_new_config.json`.
+- **`.reconfig_bridge_watch.py`**: run manually on the **host**, from this directory,
+  before starting a container run needing reconfiguration
+  (`python3 .reconfig_bridge_watch.py`). Watches for the shim's request, copies it to the
+  host's own `/tmp/sniper_interval_stats.json`, runs `tools/reconfig/rf_predict.py`
+  natively, and copies its output back through the bridge. On failure it deliberately does
+  *not* touch `config_response.ready` -- the container's shim then genuinely times out
+  after 30s rather than finding a stale/missing response file.
+- Neither script needs a rebuild after edits (`.sh`/`.py`, no compilation) -- just restart
+  the watcher process on the host to pick up changes (Python doesn't hot-reload a running
+  process).
+
+---
+
 ## McPAT power-model integration
 
 Without this, McPAT's power/area numbers reflected the un-reconfigured baseline hardware for
