@@ -29,6 +29,7 @@ private:
    // magic_server.cc records at ROI start, so the very first --partial window resolves
    // exactly like a fresh powertrace.py run's would.
    std::string m_live_config_path;
+   std::string m_mcpat_script_path;
    std::string m_prev_time_marker;
    UInt64 m_prev_time_marker_ns;
 

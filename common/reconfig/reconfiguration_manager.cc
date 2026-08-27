@@ -31,6 +31,7 @@ ReconfigurationManager::ReconfigurationManager()
    , m_decision_log_path("/tmp/sniper_reconfig_decisions.csv")
    , m_interval_index(0)
    , m_live_config_path("/tmp/sniper_reconfig_live.cfg")
+   , m_mcpat_script_path("tools/mcpat.py")
    , m_prev_time_marker("roi-begin")
    , m_prev_time_marker_ns(0)
    , m_have_prev(false)
@@ -52,6 +53,8 @@ void ReconfigurationManager::initialize()
       m_decision_log_path = Sim()->getCfg()->getString("reconfig/decision_log_path").c_str();
    if (Sim()->getCfg()->hasKey("reconfig/live_config_path"))
       m_live_config_path = Sim()->getCfg()->getString("reconfig/live_config_path").c_str();
+   if (Sim()->getCfg()->hasKey("reconfig/mcpat_script_path"))
+      m_mcpat_script_path = Sim()->getCfg()->getString("reconfig/mcpat_script_path").c_str();
 
    UInt32 total_cores = Sim()->getConfig()->getTotalCores();
    m_prev.assign(total_cores, CoreCounters());
@@ -252,10 +255,10 @@ void ReconfigurationManager::triggerPowerSample()
 
    char cmd[2048];
    snprintf(cmd, sizeof(cmd),
-      "python2 tools/mcpat.py -d %s -o %s/power-%s-%s-%llu -c %s --partial=%s:%s --no-graph",
-      output_dir.c_str(), output_dir.c_str(), m_prev_time_marker.c_str(), this_marker.c_str(),
-      (unsigned long long)duration_ns, m_live_config_path.c_str(),
-      m_prev_time_marker.c_str(), this_marker.c_str());
+      "python2 %s -d %s -o %s/power-%s-%s-%llu -c %s --partial=%s:%s --no-graph",
+      m_mcpat_script_path.c_str(), output_dir.c_str(), output_dir.c_str(),
+      m_prev_time_marker.c_str(), this_marker.c_str(), (unsigned long long)duration_ns,
+      m_live_config_path.c_str(), m_prev_time_marker.c_str(), this_marker.c_str());
    system(cmd);
 
    m_prev_time_marker = this_marker;
