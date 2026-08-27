@@ -160,11 +160,28 @@ def default_config_from_stats(stats):
     }
 
 
+def nest_config(flat):
+    """Convert this script's native flat 2-core config dict (l2_core0, l2_core1, l3,
+    btb_core0, btb_core1, prefetch_core0, prefetch_core1) to the nested schema
+    ReconfigurationManager::readConfigJSON() expects: {"cores": [{"core_id":0,
+    "l2_bytes":..., "btb_entries":..., "prefetch":...}, ...], "l3": {"l3_bytes":...}}."""
+    return {
+        'cores': [
+            {'core_id': 0, 'l2_bytes': flat['l2_core0'], 'btb_entries': flat['btb_core0'],
+             'prefetch': flat['prefetch_core0']},
+            {'core_id': 1, 'l2_bytes': flat['l2_core1'], 'btb_entries': flat['btb_core1'],
+             'prefetch': flat['prefetch_core1']},
+        ],
+        'l3': {'l3_bytes': flat['l3']},
+    }
+
+
 def write_config(config, config_file):
-    """Write predicted configuration to JSON file."""
+    """Write predicted configuration (in this script's native flat schema) to JSON file,
+    converted to the nested schema the C++ side actually reads."""
     try:
         with open(config_file, 'w') as f:
-            json.dump(config, f, indent=2)
+            json.dump(nest_config(config), f, indent=2)
         return True
     except Exception as e:
         print(f"Error writing config file {config_file}: {e}", file=sys.stderr)
