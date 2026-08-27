@@ -1071,7 +1071,7 @@ def readTemplate(ncores, num_l2s, private_l2s, num_l3s, technology_node):
     template.append(["\t\t\t\t<stat name=\"read_accesses\" value=\"%i\"/>",["BTB.read_accesses","stat",iCount]])
     template.append(["\t\t\t\t<stat name=\"write_accesses\" value=\"0\"/>",""])
     template.append(["\t\t\t\t<!-- the parameters are capacity,block_width,associativity,bank, throughput w.r.t. core clock, latency w.r.t. core clock,-->",""])
-    # NOTE: prefetcher type isn't modeled here — this McPAT version has no XML parameter for a
+    # NOTE: prefetcher type isn't modeled here -- this McPAT version has no XML parameter for a
     # configurable hardware prefetcher engine. Prefetcher type per interval is still available
     # in the reconfig CSV decision log for qualitative correlation, not as a McPAT power input.
     template.append(["\t\t\t</component>",""])
