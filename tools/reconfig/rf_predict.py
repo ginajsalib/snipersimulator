@@ -74,6 +74,35 @@ def load_stats(stats_file):
         return None
 
 
+def flatten_stats(stats):
+    """Adapt dumpIntervalStats()'s current N-core-generalized schema
+    ({"cores": [{"core_id":0, "ipc":..., "l2_prev":..., ...}, ...], "l3": {"l3_prev":...},
+    "active_cores": N}) back to the flat, core0/core1-suffixed keys this script (and the
+    underlying 7-way model, which is trained on exactly 2 cores -- see the "Assumption"
+    note in RECONFIGURATION_CHANGES.md) expects. A stats dict without a "cores" key (e.g.
+    a hand-written test fixture using the old flat schema directly) is passed through
+    unchanged."""
+    if 'cores' not in stats:
+        return stats
+
+    flat = {}
+    for core in stats['cores']:
+        c = core.get('core_id')
+        if c is None:
+            continue
+        flat['ipc_core%d' % c] = core.get('ipc', 0)
+        flat['l1_miss_rate_core%d' % c] = core.get('l1_miss_rate', 0)
+        flat['l2_miss_rate_core%d' % c] = core.get('l2_miss_rate', 0)
+        flat['l3_miss_rate_core%d' % c] = core.get('l3_miss_rate', 0)
+        flat['branch_mpki_core%d' % c] = core.get('branch_mpki', 0)
+        flat['l2core%d_prev' % c] = core.get('l2_prev', 0)
+        flat['btbcore%d_prev' % c] = core.get('btb_prev', 0)
+        flat['prefetcher_core%d_prev' % c] = core.get('prefetcher_prev', 'none')
+    flat['l3_prev'] = stats.get('l3', {}).get('l3_prev', 0)
+    flat['active_cores'] = stats.get('active_cores', len(stats['cores']))
+    return flat
+
+
 def load_model_bundle(model_dir):
     """Load the most recent saved 7-way RF model and its scaler/prefetcher encoders."""
     pkls = glob.glob(os.path.join(model_dir, "rf_7way_config_predictor_*.pkl"))
@@ -147,6 +176,7 @@ def main():
     if stats is None:
         print("Failed to load stats; cannot even fall back to current config. Aborting.", file=sys.stderr)
         return 1
+    stats = flatten_stats(stats)
 
     fallback_config = default_config_from_stats(stats)
 
