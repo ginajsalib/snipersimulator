@@ -112,11 +112,20 @@ def load_bundle(prefix):
 
 def _own_metrics_for_core(core_entry):
     """{real_column_name: value} for whatever this core's prev-config metrics alias to a
-    real training column -- see OWN_METRIC_ALIASES."""
+    real training column -- see OWN_METRIC_ALIASES. Numeric-coerced (NaN on failure),
+    matching melt_to_percore_rows()'s own = df[...].apply(pd.to_numeric, errors='coerce')
+    -- applied uniformly to every own column there, including prefetcher_prev's string
+    value, so the real trained "own prefetch" feature is always NaN. Passing the raw
+    string through here instead would silently diverge from what the model saw in
+    training, or crash scaler.transform() outright if that column is expected."""
     out = {}
     for our_key, real_key in OWN_METRIC_ALIASES.items():
-        if our_key in core_entry:
-            out[real_key] = core_entry[our_key]
+        if our_key not in core_entry:
+            continue
+        try:
+            out[real_key] = float(core_entry[our_key])
+        except (TypeError, ValueError):
+            out[real_key] = np.nan
     return out
 
 
@@ -202,7 +211,11 @@ def build_l3_row(stats):
 
 def align_to_scaler(row, scaler):
     """1-row DataFrame reindexed to scaler.feature_names_in_ (0-filled where missing),
-    the same alignment trick rf_predict.py already uses for the same documented reason."""
+    the same alignment trick rf_predict.py already uses for the same documented reason.
+    Also 0-fills any NaN left in a column we DID compute (insufficient sibling data, a
+    non-numeric own value, etc.) -- StandardScaler.transform() raises on NaN, so this is
+    the single safety net for every upstream computation rather than trying to prevent
+    NaN at each call site individually."""
     df = pd.DataFrame([row])
     if hasattr(scaler, 'feature_names_in_'):
         expected = list(scaler.feature_names_in_)
@@ -210,7 +223,7 @@ def align_to_scaler(row, scaler):
         if missing:
             df = pd.concat([df, pd.DataFrame(0.0, index=df.index, columns=missing)], axis=1)
         df = df[expected]
-    return df
+    return df.fillna(0.0)
 
 
 def apply_scaler_then_imputer(df, scaler, imputer):
