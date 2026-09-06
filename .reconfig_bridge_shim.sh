@@ -1,9 +1,12 @@
 #!/bin/bash
 # Stands in for "python3" for the single command ReconfigurationManager::runPythonPrediction()
-# runs: `python3 tools/reconfig/rf_predict.py`. Instead of actually running Python here (this
+# runs: `python3 <reconfig/python_hook_script>`. Instead of actually running Python here (this
 # old container can't run a Python new enough for the real model), it hands the stats file to
 # a host-side watcher through the already-mounted project directory and waits for the answer.
-# See .reconfig_bridge_watch.py (run on the HOST, not in this container) for the other half.
+# See .reconfig_bridge_watch.py (run on the HOST, not in this container) for the other half --
+# including which predictor script (rf_predict.py or rf_predict_ncore.py) actually runs, set
+# there via RECONFIG_PREDICT_SCRIPT, not here. This shim is agnostic to that choice; it only
+# relays the stats/config files either way.
 
 BRIDGE=/export/sniperCodeNewBranch-centos6/.reconfig_bridge
 mkdir -p "$BRIDGE"

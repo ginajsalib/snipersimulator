@@ -201,10 +201,15 @@ container restart needed.
 - **`.reconfig_bridge_watch.py`**: run manually on the **host**, from this directory,
   before starting a container run needing reconfiguration
   (`python3 .reconfig_bridge_watch.py`). Watches for the shim's request, copies it to the
-  host's own `/tmp/sniper_interval_stats.json`, runs `tools/reconfig/rf_predict.py`
-  natively, and copies its output back through the bridge. On failure it deliberately does
-  *not* touch `config_response.ready` -- the container's shim then genuinely times out
-  after 30s rather than finding a stale/missing response file.
+  host's own `/tmp/sniper_interval_stats.json`, runs a predictor script natively, and
+  copies its output back through the bridge. On failure it deliberately does *not* touch
+  `config_response.ready` -- the container's shim then genuinely times out after 30s
+  rather than finding a stale/missing response file.
+  Which predictor runs is `RECONFIG_PREDICT_SCRIPT` (default `tools/reconfig/rf_predict.py`,
+  fixed to exactly 2 cores) -- point it at `tools/reconfig/rf_predict_ncore.py` for real
+  per-core predictions on however many cores are actually simulated, once an `ncore_*`
+  bundle exists in `tools/reconfig/model/`:
+  `RECONFIG_PREDICT_SCRIPT=tools/reconfig/rf_predict_ncore.py python3 .reconfig_bridge_watch.py`
 - Neither script needs a rebuild after edits (`.sh`/`.py`, no compilation) -- just restart
   the watcher process on the host to pick up changes (Python doesn't hot-reload a running
   process).
