@@ -1,0 +1,24 @@
+N-core Random Forest Config Predictor (per-core + shared-L3)
+============================================================
+Timestamp:        20260907_002136
+Benchmarks:       ['barnes', 'cholesky', 'fft', 'radiosity']
+Core ids:         [0, 1]
+Split method:     benchmark
+Chunked:          True
+Test size:        0.2
+Sibling deltas:   True
+Per-core tuned:   False
+L3 tuned:         False
+
+Results:
+  Per-core exact-match accuracy: 0.0458
+  L3 accuracy:                   0.4179
+  Composed exact-match accuracy: 0.0009
+  Composed top-3 accuracy:       0.0025
+  Surrogate MAE/RMSE/Pearson/Spearman (2-core-only): 1.128e+10/4.672e+10/0.737/0.835
+  Surrogate trustworthy (>=0.8 corr): False
+  3-core extrapolation data found: False
+
+Per-core metric map keys (56): ['BTB _prev', 'L1-D.loads_prev', 'L1-D.stores_prev', 'L2 _prev', 'L2.evict-E_prev', 'L2.evict-I_prev', 'L2.evict-M_prev', 'L2.evict-O_prev', 'L2.evict-S_prev', 'L2.evict-prefetch_prev', 'L2.evict-u_prev', 'L2.evict-warmup_prev', 'L2.load-misses_prev', 'L2.loads_prev', 'L2.store-misses_prev', 'L2.stores_prev', 'L3.load-misses_prev', 'L3.loads_prev', 'L3.store-misses_prev', 'L3.stores_prev', 'Prefetch _prev', 'branch_mispred_rate_prev', 'branch_predictor.num-correct_prev', 'branch_predictor.num-incorrect_prev', 'branch_predictor_runtime_dynamic_prev', 'btb_runtime_dynamic_prev', 'btb_subthreshold_leakage_prev', 'core.instructions_prev', 'execution_unit_runtime_dynamic_prev', 'gate_leakage_prev', 'ifu_runtime_dynamic_prev', 'l1_data_access_prev', 'l2_avg_eviction_rate_prev', 'l2_most_hit_rate_prev', 'l2_most_usage_prev', 'l2_peak_dynamic_prev', 'l2_runtime_dynamic_prev', 'l2_subthreshold_leakage_prev', 'l3_usage_prev', 'load_store_unit_runtime_dynamic_prev', 'normalized_commit_ctrl_prev', 'normalized_commit_float_prev', 'normalized_commit_int_prev', 'normalized_commit_mem_prev', 'performance_model.elapsed_time_prev', 'performance_model.idle_elapsed_time_prev', 'performance_model.instruction_count_prev', 'rob_timer.uop_branch_prev', 'rob_timer.uop_fp_addsub_prev', 'rob_timer.uop_fp_muldiv_prev', 'rob_timer.uop_generic_prev', 'rob_timer.uop_load_prev', 'rob_timer.uop_store_prev', 'rob_timer.uops_x87_prev', 'runtime_dynamic_prev', 'subthreshold_leakage_prev']
+
+Shared context columns (12): ['benchmark', 'L3_prev', 'total_runtime_dynamic_prev', 'total_leakage_prev', 'total_peak_dynamic_prev', 'l3_runtime_dynamic_prev', 'l3_subthreshold_leakage_prev', 'l3_peak_dynamic_prev', 'time_seconds_prev', 'ips_prev', 'ips_cubed_prev', 'ppw_prev']
