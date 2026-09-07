@@ -161,29 +161,106 @@ def compute_ppw(instructions, elapsed_time_fs, power_w):
     return ips, ppw
 
 
-def count_actual_reconfigs(decision_log_path):
+def load_decision_rows(decision_log_path):
+    with open(decision_log_path) as f:
+        return list(csv.DictReader(f))
+
+
+def _prev_cols(fieldnames):
+    """'_prev' appears mid-string for per-core columns (l2_bytes_prev_core0),
+    not just at the end (l3_bytes_prev)."""
+    return [c for c in (fieldnames or []) if '_prev' in c]
+
+
+def count_actual_reconfigs(decision_rows, fieldnames):
     """{'n_rows': int, 'n_moved': int} -- n_moved counts intervals where at
     least one *_prev/*_new pair actually differs, not just status=='applied':
     a no-op/static arm's predictor also reports 'applied' every interval while
     echoing the same values back unchanged (see noop_predict.py)."""
     n_moved = 0
-    n_rows = 0
-    with open(decision_log_path) as f:
-        reader = csv.DictReader(f)
-        # '_prev' appears mid-string for per-core columns (l2_bytes_prev_core0),
-        # not just at the end (l3_bytes_prev) -- endswith('_prev') silently missed
-        # every per-core column and only ever checked l3_bytes_prev.
-        prev_cols = [c for c in (reader.fieldnames or []) if '_prev' in c]
-        for row in reader:
-            n_rows += 1
+    prev_cols = _prev_cols(fieldnames)
+    for row in decision_rows:
+        if row.get('status') != 'applied':
+            continue
+        for pc in prev_cols:
+            nc = pc.replace('_prev', '_new', 1)
+            if nc in row and row.get(pc) != row.get(nc):
+                n_moved += 1
+                break
+    return {'n_rows': len(decision_rows), 'n_moved': n_moved}
+
+
+def per_dimension_changes(decision_rows, fieldnames):
+    """{dimension_column: n_changed} -- how many 'applied' intervals actually
+    moved EACH dimension (l2_bytes_core0, btb_entries_core0, prefetch_core0,
+    l3_bytes, ...) individually, not just "did anything change" as a whole.
+    Column names here are the _prev column with that suffix stripped, e.g.
+    'l2_bytes_prev_core0' -> 'l2_bytes_core0'."""
+    counts = {}
+    for pc in _prev_cols(fieldnames):
+        dim = pc.replace('_prev', '', 1)
+        nc = pc.replace('_prev', '_new', 1)
+        n = 0
+        for row in decision_rows:
             if row.get('status') != 'applied':
                 continue
-            for pc in prev_cols:
-                nc = pc.replace('_prev', '_new', 1)
-                if nc in row and row.get(pc) != row.get(nc):
-                    n_moved += 1
-                    break
-    return {'n_rows': n_rows, 'n_moved': n_moved}
+            if nc in row and row.get(pc) != row.get(nc):
+                n += 1
+        counts[dim] = n
+    return counts
+
+
+def _row_prev_config_tuple(row, fieldnames):
+    """This row's _prev values as a tuple, in a fixed column order -- what was
+    ACTUALLY ACTIVE during the interval this row corresponds to (dumpIntervalStats()
+    re-queries live cache/BTB/prefetcher state for "_prev" at the start of handling
+    each interval, so row[i]'s _prev IS the config per_interval[i]'s power/PPW was
+    measured under -- not row[i]'s own _new, which only takes effect starting
+    next interval)."""
+    return tuple(row.get(c) for c in _prev_cols(fieldnames))
+
+
+def config_popularity(decision_rows, fieldnames, top_n=5):
+    """[(config_tuple, count), ...] -- the most common ACTIVE (prev) configs
+    across all intervals, most-common first. Uses _prev (not _new) for the same
+    reason as _row_prev_config_tuple: it's what was actually in effect."""
+    prev_cols = _prev_cols(fieldnames)
+    counter = {}
+    for row in decision_rows:
+        key = _row_prev_config_tuple(row, fieldnames)
+        counter[key] = counter.get(key, 0) + 1
+    ranked = sorted(counter.items(), key=lambda kv: -kv[1])[:top_n]
+    return prev_cols, ranked
+
+
+def ppw_stable_vs_changed(per_interval, decision_rows, fieldnames):
+    """Mean/median PPW for intervals whose ACTIVE config just changed from the
+    previous interval's (row[i]._prev != row[i-1]._prev) vs intervals where it
+    held steady. Answers "does PPW dip/improve right after a reconfiguration,
+    e.g. from the fixed transition penalty or a genuinely better/worse choice."
+    Positional pairing: per_interval[i] and decision_rows[i] share the same
+    m_interval_index (both written once per handleReconfiguration() call)."""
+    n = min(len(per_interval), len(decision_rows))
+    changed_ppw, stable_ppw = [], []
+    for i in range(1, n):
+        cur = _row_prev_config_tuple(decision_rows[i], fieldnames)
+        prv = _row_prev_config_tuple(decision_rows[i - 1], fieldnames)
+        bucket = changed_ppw if cur != prv else stable_ppw
+        if per_interval[i]['ppw'] is not None:
+            bucket.append(per_interval[i]['ppw'])
+    return {
+        'changed_mean': _mean(changed_ppw), 'changed_n': len(changed_ppw),
+        'stable_mean': _mean(stable_ppw), 'stable_n': len(stable_ppw),
+    }
+
+
+def _percentile(xs, p):
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    k = (len(xs) - 1) * p
+    f, c = int(k), min(int(k) + 1, len(xs) - 1)
+    return xs[f] if f == c else xs[f] + (xs[c] - xs[f]) * (k - f)
 
 
 def _mean(xs):
@@ -195,7 +272,7 @@ def _fmt(x):
     return 'n/a' if x is None else '%.4g' % x
 
 
-def summarize_run(resultsdir, label=None):
+def summarize_run(resultsdir, label=None, show_per_interval=False):
     label = label or resultsdir
     power_files = find_power_files(resultsdir)
     if not power_files:
@@ -238,8 +315,19 @@ def summarize_run(resultsdir, label=None):
     energy_leak_j = sum(r['power_leakage_inclusive_w'] * (r['duration_ns'] * 1e-9) for r in agg)
 
     decision_log = os.path.join(resultsdir, 'sniper_reconfig_decisions.csv')
-    n_reconfigs = count_actual_reconfigs(decision_log) if os.path.exists(decision_log) else None
+    decision_rows, fieldnames = [], []
+    n_reconfigs = per_dim = pop_cols = pop_ranked = stable_vs_changed = None
+    if os.path.exists(decision_log):
+        with open(decision_log) as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            decision_rows = list(reader)
+        n_reconfigs = count_actual_reconfigs(decision_rows, fieldnames)
+        per_dim = per_dimension_changes(decision_rows, fieldnames)
+        pop_cols, pop_ranked = config_popularity(decision_rows, fieldnames)
+        stable_vs_changed = ppw_stable_vs_changed(per_interval, decision_rows, fieldnames)
 
+    ppw_values = [r['ppw'] for r in agg]
     summary = {
         'label': label, 'resultsdir': resultsdir,
         'n_intervals': len(per_interval),
@@ -251,15 +339,26 @@ def summarize_run(resultsdir, label=None):
         'whole_run_energy_dynamic_j': energy_dyn_j,
         'whole_run_energy_leakage_inclusive_j': energy_leak_j,
         'ppw_run': ppw_run,
-        'per_interval_ppw_mean': _mean([r['ppw'] for r in agg]),
+        'per_interval_ppw_mean': _mean(ppw_values),
+        'per_interval_ppw_median': _percentile(ppw_values, 0.5),
+        'per_interval_ppw_p10': _percentile(ppw_values, 0.10),
+        'per_interval_ppw_p90': _percentile(ppw_values, 0.90),
+        'per_interval_ppw_min': (min(x for x in ppw_values if x is not None)
+                                   if any(x is not None for x in ppw_values) else None),
+        'per_interval_ppw_max': (max(x for x in ppw_values if x is not None)
+                                   if any(x is not None for x in ppw_values) else None),
         'n_reconfigs': n_reconfigs,
+        'per_dimension_changes': per_dim,
+        'config_popularity_cols': pop_cols,
+        'config_popularity': pop_ranked,
+        'ppw_stable_vs_changed': stable_vs_changed,
         'per_interval': per_interval,
     }
-    _print_summary(summary)
+    _print_summary(summary, show_per_interval=show_per_interval)
     return summary
 
 
-def _print_summary(s):
+def _print_summary(s, show_per_interval=False):
     print('=' * 70)
     print('%s  (%s)' % (s['label'], s['resultsdir']))
     print('=' * 70)
@@ -272,10 +371,48 @@ def _print_summary(s):
     print('  whole-run energy, dynamic (J):    %.4f' % s['whole_run_energy_dynamic_j'])
     print('  whole-run energy, +leakage (J):   %.4f' % s['whole_run_energy_leakage_inclusive_j'])
     print('  PPW (whole-run, dynamic power):   %s' % _fmt(s['ppw_run']))
-    print('  PPW (mean per-interval):          %s' % _fmt(s['per_interval_ppw_mean']))
+    print('  PPW per-interval: mean=%s median=%s p10=%s p90=%s min=%s max=%s' % (
+        _fmt(s['per_interval_ppw_mean']), _fmt(s['per_interval_ppw_median']),
+        _fmt(s['per_interval_ppw_p10']), _fmt(s['per_interval_ppw_p90']),
+        _fmt(s['per_interval_ppw_min']), _fmt(s['per_interval_ppw_max'])))
+
     if s['n_reconfigs'] is not None:
         print('  reconfig decisions:               %d/%d intervals actually changed the config' %
               (s['n_reconfigs']['n_moved'], s['n_reconfigs']['n_rows']))
+
+    if s['per_dimension_changes']:
+        print('')
+        print('  Per-dimension change counts (out of %d intervals):' % s['n_reconfigs']['n_rows'])
+        for dim, n in sorted(s['per_dimension_changes'].items()):
+            print('    %-22s %d' % (dim, n))
+
+    if s['config_popularity']:
+        print('')
+        print('  Most common ACTIVE configs (what was really in effect, by interval count):')
+        cols = s['config_popularity_cols']
+        for cfg_tuple, count in s['config_popularity']:
+            pct = 100.0 * count / s['n_reconfigs']['n_rows'] if s['n_reconfigs']['n_rows'] else 0.0
+            desc = ', '.join('%s=%s' % (c.replace('_prev', ''), v) for c, v in zip(cols, cfg_tuple))
+            print('    %3d (%5.1f%%)  %s' % (count, pct, desc))
+
+    svc = s['ppw_stable_vs_changed']
+    if svc and (svc['changed_n'] or svc['stable_n']):
+        print('')
+        print('  PPW: right after a config change vs. holding steady from the previous interval:')
+        print('    just changed (n=%-4d): mean PPW = %s' % (svc['changed_n'], _fmt(svc['changed_mean'])))
+        print('    held steady  (n=%-4d): mean PPW = %s' % (svc['stable_n'], _fmt(svc['stable_mean'])))
+        if svc['changed_mean'] is not None and svc['stable_mean'] not in (None, 0):
+            delta_pct = (svc['changed_mean'] - svc['stable_mean']) / svc['stable_mean'] * 100.0
+            print('    delta: %+.2f%% (transition penalty / adaptation cost shows up here if negative)' % delta_pct)
+
+    if show_per_interval:
+        print('')
+        print('  Per-interval detail:')
+        print('    %6s %14s %14s %10s %10s %14s' % ('idx', 't0', 't1', 'instrs', 'power(W)', 'ppw'))
+        for i, r in enumerate(s['per_interval']):
+            print('    %6d %14s %14s %10s %10.4f %14s' % (
+                i, r['t0'], r['t1'], _fmt(r['instructions']), r['power_dynamic_w'] or 0, _fmt(r['ppw'])))
+
     print('')
 
 
@@ -342,6 +479,8 @@ def main():
     p1 = sub.add_parser('summarize', help='Per-run PPW/energy summary')
     p1.add_argument('--dir', required=True)
     p1.add_argument('--label', default=None)
+    p1.add_argument('--per-interval', action='store_true', default=False,
+                     help='Also print a row per interval (t0/t1/instructions/power/PPW).')
 
     p2 = sub.add_parser('compare', help='Cross-arm headline comparison for one benchmark')
     p2.add_argument('--benchmark', required=True)
@@ -353,7 +492,7 @@ def main():
 
     args = ap.parse_args()
     if args.cmd == 'summarize':
-        summarize_run(args.dir, label=args.label)
+        summarize_run(args.dir, label=args.label, show_per_interval=args.per_interval)
     elif args.cmd == 'compare':
         arms = {'no_change': args.no_change, 'best_static': args.best_static,
                 'dynamic_rf': args.dynamic_rf}
