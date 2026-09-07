@@ -219,6 +219,20 @@ tools/reconfig/analyze_final_experiment.py         # or: adapt ppw_savings_summa
   set.
 - **Equal work per arm.** `-s stop-by-icount:<N>` or SPLASH ROI markers so
   `total_instructions` is ~constant per benchmark across arms.
+- **Core timing model mismatch with training data.** The reconfiguration hook
+  only exists inside `IntervalPerformanceModel::simulate()`
+  (`interval_performance_model.cc`) -- it is unreachable under
+  `perf_model/core/type = rob` (`RobPerformanceModel`/`RobSmtPerformanceModel`,
+  `performance_model.cc:36-42`). `runSniperWithCfg.sh`, the script that
+  generated the actual training/sweep data (`merged_full_<bench>.csv`,
+  `train_with_top3_<bench>.csv`), uses `-c rob`. So every arm here necessarily
+  runs under `interval` (via `-c gainestown` alone, which pulls in
+  `nehalem.cfg`'s `type = interval` -- do **not** add `-c rob`), a different
+  core model than the one that produced `best_static`'s chosen values and
+  everything the RF/surrogate models learned from. This is a real, unavoidable
+  train/test mismatch on top of the ones already listed below -- disclose it
+  explicitly rather than treating `best_static` as if it were being run under
+  its original collection conditions.
 - **Warm-up.** Drop interval 0 (cold caches; model sees no deltas) from every
   arm's aggregate.
 - **Determinism.** Single-threaded interval model is deterministic; multithreaded
