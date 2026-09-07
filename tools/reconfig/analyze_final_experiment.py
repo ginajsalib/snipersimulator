@@ -170,14 +170,16 @@ def count_actual_reconfigs(decision_log_path):
     n_rows = 0
     with open(decision_log_path) as f:
         reader = csv.DictReader(f)
-        prev_cols = [c for c in (reader.fieldnames or [])
-                     if c.endswith('_prev')]
+        # '_prev' appears mid-string for per-core columns (l2_bytes_prev_core0),
+        # not just at the end (l3_bytes_prev) -- endswith('_prev') silently missed
+        # every per-core column and only ever checked l3_bytes_prev.
+        prev_cols = [c for c in (reader.fieldnames or []) if '_prev' in c]
         for row in reader:
             n_rows += 1
             if row.get('status') != 'applied':
                 continue
             for pc in prev_cols:
-                nc = pc[:-len('_prev')] + '_new'
+                nc = pc.replace('_prev', '_new', 1)
                 if nc in row and row.get(pc) != row.get(nc):
                     n_moved += 1
                     break
