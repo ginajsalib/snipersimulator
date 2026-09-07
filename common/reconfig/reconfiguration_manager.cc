@@ -161,13 +161,16 @@ void ReconfigurationManager::logDecision(const char* status, const PredictedConf
 
    if (cfg)
    {
+      // l2/l3 "_new": live-queried actual state, not cfg's raw request -- reconfigure()
+      // may have clamped a requested shrink (live data in use), so these can differ from
+      // what was asked for. btb/prefetch have no such clamping, so cfg's values stand.
       for (core_id_t c = 0; c < (core_id_t)total_cores; c++)
-         fprintf(f, "%llu,", (c < (core_id_t)cfg->cores.size()) ? (unsigned long long)cfg->cores[c].l2_bytes : 0ULL);
+         fprintf(f, "%llu,", (c < (core_id_t)cfg->cores.size()) ? (unsigned long long)getLiveL2Bytes(c) : 0ULL);
       for (core_id_t c = 0; c < (core_id_t)total_cores; c++)
          fprintf(f, "%llu,", (c < (core_id_t)cfg->cores.size()) ? (unsigned long long)cfg->cores[c].btb_entries : 0ULL);
       for (core_id_t c = 0; c < (core_id_t)total_cores; c++)
          fprintf(f, "%s,", (c < (core_id_t)cfg->cores.size()) ? cfg->cores[c].prefetch.c_str() : "");
-      fprintf(f, "%llu,%llu\n", (unsigned long long)s.l3_bytes_prev, (unsigned long long)cfg->l3_bytes);
+      fprintf(f, "%llu,%llu\n", (unsigned long long)s.l3_bytes_prev, (unsigned long long)getLiveL3Bytes());
    }
    else
    {
@@ -176,6 +179,34 @@ void ReconfigurationManager::logDecision(const char* status, const PredictedConf
    }
 
    fclose(f);
+}
+
+UInt64 ReconfigurationManager::getLiveL2Bytes(core_id_t core_id)
+{
+   Core *core = Sim()->getCoreManager()->getCoreFromID(core_id);
+   ParametricDramDirectoryMSI::MemoryManager *mm = core
+      ? dynamic_cast<ParametricDramDirectoryMSI::MemoryManager*>(core->getMemoryManager())
+      : NULL;
+   if (!mm)
+      return 0;
+   ParametricDramDirectoryMSI::CacheCntlr *l2 = mm->getCacheCntlrAt(core_id, MemComponent::L2_CACHE);
+   if (!l2 || !l2->getCache())
+      return 0;
+   return (UInt64)l2->getCache()->getActiveWays() * l2->getCache()->getNumSets() * l2->getCacheBlockSize();
+}
+
+UInt64 ReconfigurationManager::getLiveL3Bytes()
+{
+   Core *core = Sim()->getCoreManager()->getCoreFromID(0);
+   ParametricDramDirectoryMSI::MemoryManager *mm = core
+      ? dynamic_cast<ParametricDramDirectoryMSI::MemoryManager*>(core->getMemoryManager())
+      : NULL;
+   if (!mm)
+      return 0;
+   ParametricDramDirectoryMSI::CacheCntlr *l3 = mm->getCacheCntlrAt(0, MemComponent::L3_CACHE);
+   if (!l3 || !l3->getCache())
+      return 0;
+   return (UInt64)l3->getCache()->getActiveWays() * l3->getCache()->getNumSets() * l3->getCacheBlockSize();
 }
 
 void ReconfigurationManager::writeLiveConfigSnapshot()

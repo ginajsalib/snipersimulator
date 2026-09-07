@@ -99,7 +99,18 @@ private:
 
    // Appends one row to m_decision_log_path pairing m_last_snapshot ("before") with
    // cfg ("after"); cfg is NULL when prediction/parsing failed and no change was applied.
+   // The L2/L3 "_new" columns are live-queried (getLiveL2Bytes()/getLiveL3Bytes()), NOT
+   // cfg's raw requested bytes: CacheCntlr::reconfigure() clamps a requested shrink when
+   // live (valid/dirty) data still occupies more ways than requested (see cache_cntlr.cc's
+   // "clamped to N active ways" warning), so the two can legitimately differ. BTB/prefetch
+   // have no such clamping, so cfg's values are used as-is for those.
    void logDecision(const char* status, const PredictedConfig* cfg);
+
+   // Actual live L2/L3 capacity right now, in bytes -- same getActiveWays()/getNumSets()/
+   // getCacheBlockSize() query dumpIntervalStats() uses for "prev", exposed here so
+   // logDecision() can capture the real post-apply state for "new" too.
+   UInt64 getLiveL2Bytes(core_id_t core_id);
+   UInt64 getLiveL3Bytes();
 
    // Writes the currently-live L2/L3/BTB config (post-reconfiguration, or unchanged on
    // failure) to m_live_config_path in sniper_config text format, for McPAT's -c override.
