@@ -272,7 +272,7 @@ def _fmt(x):
     return 'n/a' if x is None else '%.4g' % x
 
 
-def summarize_run(resultsdir, label=None, show_per_interval=False):
+def summarize_run(resultsdir, label=None, show_per_interval=False, quiet=False):
     label = label or resultsdir
     power_files = find_power_files(resultsdir)
     if not power_files:
@@ -354,7 +354,8 @@ def summarize_run(resultsdir, label=None, show_per_interval=False):
         'ppw_stable_vs_changed': stable_vs_changed,
         'per_interval': per_interval,
     }
-    _print_summary(summary, show_per_interval=show_per_interval)
+    if not quiet:
+        _print_summary(summary, show_per_interval=show_per_interval)
     return summary
 
 
@@ -416,6 +417,92 @@ def _print_summary(s, show_per_interval=False):
     print('')
 
 
+def diagnose_decisions(benchmark, dynamic_rf_dir, no_change_dir, best_static_dir=None):
+    """Judges each of dynamic_rf's actual reconfig decisions against a real counterfactual:
+    no_change's per-interval PPW at that SAME interval index (interval boundaries are
+    instruction-count-based -- see interval_performance_model.cc -- so interval i means
+    roughly the same point in the program's execution across arms run on the same
+    benchmark/instruction budget, making this an apples-to-apples "what if we'd just left
+    it alone at this exact phase" comparison, not merely dynamic_rf's own before/after).
+    best_static (optional) additionally shows how much headroom was left on the table.
+    """
+    s_rf = summarize_run(dynamic_rf_dir, label='%s/dynamic_rf' % benchmark, quiet=True)
+    s_nc = summarize_run(no_change_dir, label='%s/no_change' % benchmark, quiet=True)
+    if s_rf is None or s_nc is None:
+        print('Cannot diagnose: dynamic_rf or no_change arm produced no usable summary')
+        return None
+    s_bs = summarize_run(best_static_dir, label='%s/best_static' % benchmark, quiet=True) \
+        if best_static_dir else None
+
+    decision_log = os.path.join(dynamic_rf_dir, 'sniper_reconfig_decisions.csv')
+    if not os.path.exists(decision_log):
+        print('No decision log at %s' % decision_log)
+        return None
+    with open(decision_log) as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+        decision_rows = list(reader)
+
+    pi_rf, pi_nc = s_rf['per_interval'], s_nc['per_interval']
+    pi_bs = s_bs['per_interval'] if s_bs else None
+    n = min(len(pi_rf), len(pi_nc), len(decision_rows))
+    rows = []  # one entry per actual TRANSITION (this interval's active config != previous
+               # interval's), matching count_actual_reconfigs()/ppw_stable_vs_changed()'s own
+               # convention -- NOT "differs from interval 0", which would also flag every
+               # interval downstream of one lasting change and drown out the real signal.
+    all_deltas_vs_nc = []   # dynamic_rf PPW - no_change PPW, every interval (not just transitions)
+    all_gaps_vs_bs = []     # best_static PPW - dynamic_rf PPW, every interval
+
+    for i in range(1, n):  # interval 0 excluded: cold caches, same convention as summarize_run
+        cfg_i = _row_prev_config_tuple(decision_rows[i], fieldnames)
+        cfg_prev = _row_prev_config_tuple(decision_rows[i - 1], fieldnames)
+        ppw_rf_i, ppw_nc_i = pi_rf[i]['ppw'], pi_nc[i]['ppw']
+        if ppw_rf_i is not None and ppw_nc_i is not None:
+            all_deltas_vs_nc.append(ppw_rf_i - ppw_nc_i)
+        if pi_bs is not None and i < len(pi_bs) and pi_bs[i]['ppw'] is not None and ppw_rf_i is not None:
+            all_gaps_vs_bs.append(pi_bs[i]['ppw'] - ppw_rf_i)
+
+        if cfg_i != cfg_prev:
+            delta = (ppw_rf_i - ppw_nc_i) if (ppw_rf_i is not None and ppw_nc_i is not None) else None
+            changed_dims = [pc.replace('_prev', '', 1) for pc, v0, vi in
+                             zip(_prev_cols(fieldnames), cfg_prev, cfg_i) if v0 != vi]
+            rows.append({
+                'interval': decision_rows[i].get('interval', i), 'changed_dims': changed_dims,
+                'cfg': dict(zip(_prev_cols(fieldnames), cfg_i)),
+                'ppw_rf': ppw_rf_i, 'ppw_nc': ppw_nc_i, 'delta_vs_nochange': delta,
+            })
+
+    print('=' * 70)
+    print('DECISION DIAGNOSIS -- %s' % benchmark)
+    print('=' * 70)
+    print('  %d actual transitions out of %d intervals (%d skipped as warm-up)' %
+          (len(rows), n - 1, 1))
+    print('')
+    if rows:
+        print('  %-8s %-30s %12s %12s %10s' % ('interval', 'changed dims', 'PPW(rf)', 'PPW(no_change)', 'delta'))
+        for r in rows:
+            print('  %-8s %-30s %12s %12s %+9.1f%%' % (
+                r['interval'], ','.join(r['changed_dims']) or '(none? bug)',
+                _fmt(r['ppw_rf']), _fmt(r['ppw_nc']),
+                (r['delta_vs_nochange'] / r['ppw_nc'] * 100.0)
+                if r['delta_vs_nochange'] is not None and r['ppw_nc'] else float('nan')))
+        deltas = [r['delta_vs_nochange'] for r in rows if r['delta_vs_nochange'] is not None]
+        n_helped = sum(1 for d in deltas if d > 0)
+        n_hurt = sum(1 for d in deltas if d < 0)
+        print('')
+        print('  of %d judged decisions: %d helped (PPW > no_change at that phase), %d hurt' %
+              (len(deltas), n_helped, n_hurt))
+        print('  mean PPW delta on decision intervals: %s (vs no_change, same phase)' % _fmt(_mean(deltas)))
+    print('')
+    print('  mean PPW delta, ALL intervals (dynamic_rf - no_change, same phase): %s' %
+          _fmt(_mean(all_deltas_vs_nc)))
+    if all_gaps_vs_bs:
+        print('  mean PPW gap,  ALL intervals (best_static - dynamic_rf, same phase): %s'
+              '  <- average headroom left on the table' % _fmt(_mean(all_gaps_vs_bs)))
+    return {'rows': rows, 'mean_delta_vs_nochange': _mean(all_deltas_vs_nc),
+            'mean_gap_vs_best_static': _mean(all_gaps_vs_bs) if all_gaps_vs_bs else None}
+
+
 def compare_arms(benchmark, arms, oracle_ppw=None):
     """arms: {'no_change': dir, 'best_static': dir, 'dynamic_rf': dir,
     ['max_resources': dir]}. Prints FINAL_EXPERIMENT.md's three headline metrics."""
@@ -428,47 +515,127 @@ def compare_arms(benchmark, arms, oracle_ppw=None):
         summaries[name] = s
 
     ppw = dict((name, s['ppw_run']) for name, s in summaries.items())
-    for required in ('no_change', 'best_static', 'dynamic_rf'):
-        if ppw.get(required) is None:
-            print('Need a valid PPW for no_change, best_static, and dynamic_rf to compare '
-                  '(missing or zero: %s).' % required)
-            return None
+    # Only dynamic_rf is mandatory. no_change/best_static are frequently absent by design:
+    # best_static exists only for the 4 sweep benchmarks (and even there it is a 2-core
+    # `-c rob` config), and no_change is just another small static point. Report whichever
+    # baselines are actually present rather than refusing to compare.
+    if ppw.get('dynamic_rf') is None:
+        print('Need a valid PPW for dynamic_rf to compare.')
+        return None
 
-    savings_vs_no_change = (ppw['dynamic_rf'] - ppw['no_change']) / ppw['no_change'] * 100.0
-    savings_vs_best_static = (ppw['dynamic_rf'] - ppw['best_static']) / ppw['best_static'] * 100.0
+    def _delta(baseline):
+        b = ppw.get(baseline)
+        if b is None or not b:
+            return None
+        return (ppw['dynamic_rf'] - b) / b * 100.0
+
+    savings_vs_no_change = _delta('no_change')
+    savings_vs_best_static = _delta('best_static')
+    savings_vs_max_resources = _delta('max_resources')
+    savings_vs_max_resources_nopf = _delta('max_resources_nopf')
 
     headroom = None
-    if oracle_ppw:
+    if oracle_ppw and ppw.get('best_static'):
         denom = oracle_ppw - ppw['best_static']
         headroom = ((ppw['dynamic_rf'] - ppw['best_static']) / denom * 100.0) if denom else None
 
     print('=' * 70)
     print('HEADLINE COMPARISON -- %s' % benchmark)
     print('=' * 70)
-    for name in ('no_change', 'best_static', 'dynamic_rf', 'max_resources'):
+    for name in ('no_change', 'best_static', 'dynamic_rf', 'max_resources', 'max_resources_nopf'):
         if name in ppw:
-            print('  PPW[%-14s] = %s' % (name, _fmt(ppw[name])))
+            print('  PPW[%-18s] = %s' % (name, _fmt(ppw[name])))
     print('')
-    print('  savings_vs_no_change   = %+.2f%%' % savings_vs_no_change)
-    print('  savings_vs_best_static = %+.2f%%' % savings_vs_best_static)
+    for label, val in (('savings_vs_no_change', savings_vs_no_change),
+                        ('savings_vs_best_static', savings_vs_best_static),
+                        ('savings_vs_max_resources', savings_vs_max_resources),
+                        ('savings_vs_max_resources_nopf', savings_vs_max_resources_nopf)):
+        if val is not None:
+            print('  %-30s = %+.2f%%' % (label, val))
     if headroom is not None:
-        print('  headroom_captured      = %.2f%%   (oracle PPW = %s)' % (headroom, _fmt(oracle_ppw)))
-    else:
-        print("  headroom_captured      = n/a (pass --oracle-ppw; see static_vs_optimal.py's "
-              'per-interval oracle for this benchmark)')
-    if 'max_resources' in ppw:
-        beats = ppw['max_resources'] > ppw['best_static']
+        print('  %-30s = %.2f%%   (oracle PPW = %s)' % ('headroom_captured', headroom, _fmt(oracle_ppw)))
+
+    # max_resources has collapsed (~4-5x slowdown) in every run so far, which makes a
+    # percentage against it enormous but hard to attribute. If the no-prefetcher variant
+    # is present, say which factor is responsible rather than leaving it ambiguous.
+    if savings_vs_max_resources is not None and savings_vs_max_resources_nopf is not None:
         print('')
-        print('  sanity check: max_resources %s best_static (%s vs %s)%s' % (
-            '>' if beats else '<=', _fmt(ppw['max_resources']), _fmt(ppw['best_static']),
-            '  <-- widen the finalist set, see FINAL_EXPERIMENT.md' if beats else ''))
+        if ppw['max_resources_nopf'] > ppw['max_resources'] * 2:
+            print('  NOTE: max_resources_nopf is %.1fx max_resources -- the collapse is the'
+                  % (ppw['max_resources_nopf'] / ppw['max_resources']))
+            print('        PREFETCHER, not the cache sizes. Quote savings_vs_max_resources_nopf;')
+            print('        savings_vs_max_resources mostly measures a misconfigured prefetcher.')
+        else:
+            print('  NOTE: disabling the prefetcher does not recover max_resources'
+                  ' (%.2fx) -- the' % (ppw['max_resources_nopf'] / ppw['max_resources']))
+            print('        collapse is attributable to over-provisioning itself, so'
+                  ' savings_vs_max_resources stands.')
 
     return {
         'benchmark': benchmark, 'ppw': ppw,
         'savings_vs_no_change': savings_vs_no_change,
         'savings_vs_best_static': savings_vs_best_static,
+        'savings_vs_max_resources': savings_vs_max_resources,
+        'savings_vs_max_resources_nopf': savings_vs_max_resources_nopf,
         'headroom_captured': headroom,
     }
+
+
+def sweep_summary(resultsroot, arms=None):
+    """Tabulate every benchmark under resultsroot/<benchmark>/<arm>/, reporting
+    dynamic_rf's PPW gain over each baseline present. Benchmarks whose arms are missing
+    or crashed (no sim.out) are listed as skipped rather than silently dropped."""
+    arms = arms or ['dynamic_rf', 'max_resources', 'max_resources_nopf', 'best_static', 'no_change']
+    benches = sorted(d for d in os.listdir(resultsroot)
+                     if os.path.isdir(os.path.join(resultsroot, d)))
+    rows, skipped = [], []
+    for bench in benches:
+        ppw = {}
+        for arm in arms:
+            d = os.path.join(resultsroot, bench, arm)
+            if not os.path.isdir(d):
+                continue
+            if not os.path.exists(os.path.join(d, 'sim.out')):
+                skipped.append('%s/%s (crashed: no sim.out)' % (bench, arm))
+                continue
+            s = summarize_run(d, label='%s/%s' % (bench, arm), quiet=True)
+            if s and s['ppw_run']:
+                ppw[arm] = s['ppw_run']
+        if 'dynamic_rf' not in ppw:
+            skipped.append('%s (no usable dynamic_rf)' % bench)
+            continue
+        rows.append((bench, ppw))
+
+    print('=' * 78)
+    print('N=4 SWEEP SUMMARY -- dynamic_rf PPW gain over each baseline')
+    print('=' * 78)
+    print('  %-14s %12s %12s %12s %12s' % ('benchmark', 'dynamic_rf', 'vs max_res', 'vs max_nopf', 'vs best_stat'))
+    def pct(d, b):
+        return '%+.1f%%' % ((d - b) / b * 100.0) if b else 'n/a'
+    for bench, ppw in rows:
+        d = ppw['dynamic_rf']
+        print('  %-14s %12s %12s %12s %12s' % (
+            bench, _fmt(d),
+            pct(d, ppw['max_resources']) if 'max_resources' in ppw else 'n/a',
+            pct(d, ppw['max_resources_nopf']) if 'max_resources_nopf' in ppw else 'n/a',
+            pct(d, ppw['best_static']) if 'best_static' in ppw else 'n/a'))
+    if rows:
+        # Geometric mean of the ratio is the right average for a ratio-of-ratios metric;
+        # an arithmetic mean of percentages would be skewed by max_resources' collapse.
+        import math
+        for base in ('max_resources', 'max_resources_nopf'):
+            ratios = [ppw['dynamic_rf'] / ppw[base] for _, ppw in rows if ppw.get(base)]
+            if ratios:
+                gm = math.exp(sum(math.log(r) for r in ratios) / len(ratios))
+                print('')
+                print('  geomean dynamic_rf / %-18s = %.2fx  (%+.1f%%, n=%d)'
+                      % (base, gm, (gm - 1) * 100.0, len(ratios)))
+    if skipped:
+        print('')
+        print('  skipped:')
+        for s in skipped:
+            print('    - %s' % s)
+    return rows
 
 
 def main():
@@ -484,21 +651,42 @@ def main():
 
     p2 = sub.add_parser('compare', help='Cross-arm headline comparison for one benchmark')
     p2.add_argument('--benchmark', required=True)
-    p2.add_argument('--no-change', dest='no_change', required=True)
-    p2.add_argument('--best-static', dest='best_static', required=True)
+    p2.add_argument('--no-change', dest='no_change', default=None)
+    p2.add_argument('--best-static', dest='best_static', default=None)
     p2.add_argument('--dynamic-rf', dest='dynamic_rf', required=True)
     p2.add_argument('--max-resources', dest='max_resources', default=None)
+    p2.add_argument('--max-resources-nopf', dest='max_resources_nopf', default=None)
     p2.add_argument('--oracle-ppw', type=float, default=None)
+
+    p3 = sub.add_parser('diagnose',
+                         help="Judge dynamic_rf's individual reconfig decisions against "
+                              'no_change at the same interval (real counterfactual, not '
+                              "just dynamic_rf's own before/after)")
+    p3.add_argument('--benchmark', required=True)
+    p3.add_argument('--dynamic-rf', dest='dynamic_rf', required=True)
+    p3.add_argument('--no-change', dest='no_change', required=True)
+    p3.add_argument('--best-static', dest='best_static', default=None,
+                     help='Optional: also report average headroom left vs best_static')
+
+    p4 = sub.add_parser('sweep', help='Tabulate every benchmark under a results root '
+                                       '(e.g. results/n4_hetero) vs each baseline')
+    p4.add_argument('--root', required=True)
 
     args = ap.parse_args()
     if args.cmd == 'summarize':
         summarize_run(args.dir, label=args.label, show_per_interval=args.per_interval)
     elif args.cmd == 'compare':
-        arms = {'no_change': args.no_change, 'best_static': args.best_static,
-                'dynamic_rf': args.dynamic_rf}
-        if args.max_resources:
-            arms['max_resources'] = args.max_resources
+        arms = {'dynamic_rf': args.dynamic_rf}
+        for name, d in (('no_change', args.no_change), ('best_static', args.best_static),
+                        ('max_resources', args.max_resources),
+                        ('max_resources_nopf', args.max_resources_nopf)):
+            if d:
+                arms[name] = d
         compare_arms(args.benchmark, arms, oracle_ppw=args.oracle_ppw)
+    elif args.cmd == 'diagnose':
+        diagnose_decisions(args.benchmark, args.dynamic_rf, args.no_change, args.best_static)
+    elif args.cmd == 'sweep':
+        sweep_summary(args.root)
     else:
         ap.print_help()
         sys.exit(1)

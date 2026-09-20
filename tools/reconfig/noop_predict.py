@@ -1,4 +1,10 @@
-#!/usr/bin/env python3
+#!/opt/rh/rh-python36/root/usr/bin/python3.6
+# Absolute, unaliased interpreter path -- NOT "/usr/bin/env python3": on the CentOS6
+# container, /usr/bin/python3 is itself a symlink to .reconfig_bridge_shim.sh (see
+# reconfiguration_manager.cc's runPythonPrediction(), which now execs this file directly
+# via its own shebang instead of hardcoding "python3 <script>"). Going through "env
+# python3" or plain "python3" here would resolve right back to that shim and this script
+# would never actually run -- see tools/reconfig/BUG_static_arm_drift.md.
 """
 No-op "predictor" -- echoes the current (prev) configuration back unchanged, every
 interval. Used as the `no_change` and `best_static` arms of the final experiment

@@ -48,6 +48,35 @@ import numpy as np
 import pandas as pd
 import joblib
 
+
+class ZeroImputer(object):
+    """Unpickling shim -- MUST stay behaviourally identical to randomForestNCoreGPU.py's
+    class of the same name (fills NaN with 0.0 on already-standardized data).
+
+    randomForestNCoreGPU.py defines ZeroImputer at module level and was run as a script,
+    so joblib pickled the fitted imputer under the name `__main__.ZeroImputer`. Unpickling
+    it here therefore looks for ZeroImputer in *this* process's __main__, finds nothing,
+    and load_bundle() fails with "Can't get attribute 'ZeroImputer'" -- which silently
+    degrades every dynamic_rf interval to predict_failed (the bridge sees rc=1 and the
+    container times out). Defining it here fixes the direct-script case; the explicit
+    __main__ registration below also covers being imported rather than run.
+
+    Pickle restores instance __dict__ (feature_names_in_) without calling __init__, so
+    only transform() has to match.
+    """
+    def __init__(self, feature_names=None):
+        self.feature_names_in_ = np.array(list(feature_names)) if feature_names is not None else None
+
+    def transform(self, X):
+        X = np.asarray(X, dtype=np.float32)
+        return np.nan_to_num(X, nan=0.0)
+
+
+import __main__ as _main_module
+if not hasattr(_main_module, "ZeroImputer"):
+    _main_module.ZeroImputer = ZeroImputer
+
+
 STATS_FILE = "/tmp/sniper_interval_stats.json"
 CONFIG_FILE = "/tmp/sniper_new_config.json"
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model")
