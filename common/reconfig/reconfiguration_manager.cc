@@ -112,10 +112,21 @@ SInt64 ReconfigurationManager::handleReconfiguration(core_id_t core_id)
       return -1;
    }
 
-   applyReconfiguration(predicted);
-   logDecision("applied", &predicted);
+   // Power-sample BEFORE applying: triggerPowerSample()'s --partial window covers the
+   // interval that just ELAPSED, which ran under the pre-apply config, so that's the
+   // config McPAT must be given via -c. Snapshotting after applyReconfiguration() (as
+   // this did originally) billed each interval's activity counters against the *next*
+   // interval's geometry -- harmless when nothing changed, but wrong on exactly the
+   // intervals where a reconfiguration was applied. See tools/reconfig/CACHE_COHERENCE_AUDIT.md.
    writeLiveConfigSnapshot();
    triggerPowerSample();
+
+   applyReconfiguration(predicted);
+   logDecision("applied", &predicted);
+   // Re-snapshot so the file at rest describes what is actually live now (the next
+   // interval overwrites it with the same values; this is purely so anyone reading
+   // m_live_config_path between intervals sees current state, not the previous config).
+   writeLiveConfigSnapshot();
    m_interval_index++;
 
    LOG_PRINT("Reconfiguration completed");
@@ -141,12 +152,19 @@ void ReconfigurationManager::logDecision(const char* status, const PredictedConf
       static const char* per_core_stat_names[] = {
          "ipc", "l1_miss_rate", "l2_miss_rate", "l3_miss_rate", "branch_mpki",
          "l2_bytes_prev", "btb_entries_prev", "prefetch_prev",
-         "l2_bytes_new", "btb_entries_new", "prefetch_new"
+         "l2_bytes_new", "btb_entries_new", "prefetch_new",
+         // Raw model request, before Cache::setActiveWays() clamps/saturates it. Without
+         // this the "_new" columns alone cannot distinguish "the model asked to stay at
+         // full size" from "the model asked for more than this core physically has and
+         // the request saturated" -- and the clamp's own warning is LOG_PRINT_WARNING,
+         // compiled out under NDEBUG. Matters most with heterogeneous cores, where the
+         // same byte request is a different fraction of each core's cache.
+         "l2_bytes_req"
       };
       for (size_t s_i = 0; s_i < sizeof(per_core_stat_names) / sizeof(per_core_stat_names[0]); s_i++)
          for (core_id_t c = 0; c < (core_id_t)total_cores; c++)
             fprintf(f, "%s_core%d,", per_core_stat_names[s_i], c);
-      fprintf(f, "l3_bytes_prev,l3_bytes_new\n");
+      fprintf(f, "l3_bytes_prev,l3_bytes_new,l3_bytes_req\n");
    }
 
    fprintf(f, "%llu,%s,", (unsigned long long)m_interval_index, status);
@@ -170,12 +188,20 @@ void ReconfigurationManager::logDecision(const char* status, const PredictedConf
          fprintf(f, "%llu,", (c < (core_id_t)cfg->cores.size()) ? (unsigned long long)cfg->cores[c].btb_entries : 0ULL);
       for (core_id_t c = 0; c < (core_id_t)total_cores; c++)
          fprintf(f, "%s,", (c < (core_id_t)cfg->cores.size()) ? cfg->cores[c].prefetch.c_str() : "");
-      fprintf(f, "%llu,%llu\n", (unsigned long long)s.l3_bytes_prev, (unsigned long long)getLiveL3Bytes());
+      // ..._req: what the model actually asked for. Compare against the "_new" columns
+      // above to see saturation/clamping (req > new means the request didn't fit).
+      for (core_id_t c = 0; c < (core_id_t)total_cores; c++)
+         fprintf(f, "%llu,", (c < (core_id_t)cfg->cores.size()) ? (unsigned long long)cfg->cores[c].l2_bytes : 0ULL);
+      fprintf(f, "%llu,%llu,%llu\n", (unsigned long long)s.l3_bytes_prev,
+              (unsigned long long)getLiveL3Bytes(), (unsigned long long)cfg->l3_bytes);
    }
    else
    {
-      for (core_id_t c = 0; c < (core_id_t)(3 * total_cores); c++) fprintf(f, ",");
-      fprintf(f, "%llu,\n", (unsigned long long)s.l3_bytes_prev);
+      // 4 blank per-core groups now (l2_new, btb_new, prefetch_new, l2_req), then
+      // l3_bytes_prev with l3_bytes_new and l3_bytes_req left empty. Keep this count in
+      // step with per_core_stat_names above or every column after it shifts.
+      for (core_id_t c = 0; c < (core_id_t)(4 * total_cores); c++) fprintf(f, ",");
+      fprintf(f, "%llu,,\n", (unsigned long long)s.l3_bytes_prev);
    }
 
    fclose(f);
@@ -421,12 +447,19 @@ void ReconfigurationManager::dumpIntervalStats(const std::string& output_file)
 
 bool ReconfigurationManager::runPythonPrediction(const std::string& script_path)
 {
-   std::string cmd = "python3 " + script_path;
-   int ret = system(cmd.c_str());
+   // Run script_path directly (its own shebang + chmod +x decide the interpreter) rather
+   // than hardcoding "python3 <script_path>". On the CentOS6 container image, /usr/bin/
+   // python3 is itself a symlink to .reconfig_bridge_shim.sh (needed so that arm's bridge
+   // hand-off works no matter what reconfig/python_hook_script is set to) -- hardcoding
+   // "python3" here meant EVERY script_path silently ran the bridge shim instead of itself,
+   // regardless of what reconfig/python_hook_script actually named (see
+   // tools/reconfig/BUG_static_arm_drift.md). noop_predict.py's shebang points at a real,
+   // unaliased interpreter for exactly this reason.
+   int ret = system(script_path.c_str());
 
    if (ret != 0)
    {
-      LOG_PRINT_WARNING("Python prediction script failed with return code %d", ret);
+      LOG_PRINT_WARNING("Prediction script %s failed with return code %d", script_path.c_str(), ret);
       return false;
    }
    return true;

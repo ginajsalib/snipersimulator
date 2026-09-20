@@ -25,7 +25,10 @@ CacheSetPLRU::getReplacementIndex(CacheCntlr *cntlr)
 
    for (UInt32 i = 0; i < m_associativity; i++)
    {
-      if (!m_cache_block_info_array[i]->isValid())
+      // isValidReplacement() gates power-gated ways (see CacheSet::setActiveWays):
+      // without it this fast path allocates straight into a gated way, since gated
+      // ways are exactly the invalid ones at gating time.
+      if (!m_cache_block_info_array[i]->isValid() && isValidReplacement(i))
       {
          updateReplacementIndex(i);
          return i;
