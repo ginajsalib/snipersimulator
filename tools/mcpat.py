@@ -212,28 +212,56 @@ def main(jobid, resultsdir, outputfile, powertype = 'dynamic', config = None, no
   # a flat number map). Keys are the training column names minus the "_prev" suffix.
   # Missing components resolve to 0.0 rather than being omitted, so the C++ side never
   # has to distinguish "absent" from "zero".
-  def _pd(component, stat):
-    return float(power_dat.get(component, {}).get(stat, 0.0) or 0.0)
-  power_features = {
-    'total_runtime_dynamic':            _pd('Processor', 'Runtime Dynamic'),
-    'total_peak_dynamic':               _pd('Processor', 'Peak Dynamic'),
-    'total_leakage':                    _pd('Processor', 'Total Leakage'),
-    'runtime_dynamic':                  _pd('Processor', 'Runtime Dynamic'),
-    'subthreshold_leakage':             _pd('Processor', 'Subthreshold Leakage'),
-    'gate_leakage':                     _pd('Processor', 'Gate Leakage'),
-    'execution_unit_runtime_dynamic':   _pd('Core', 'Execution Unit/Runtime Dynamic'),
-    'ifu_runtime_dynamic':              _pd('Core', 'Instruction Fetch Unit/Runtime Dynamic'),
-    'load_store_unit_runtime_dynamic':  _pd('Core', 'Load Store Unit/Runtime Dynamic'),
-    'branch_predictor_runtime_dynamic': _pd('Core', 'Instruction Fetch Unit/Branch Predictor/Runtime Dynamic'),
-    'btb_runtime_dynamic':              _pd('Core', 'Instruction Fetch Unit/Branch Target Buffer/Runtime Dynamic'),
-    'btb_subthreshold_leakage':         _pd('Core', 'Instruction Fetch Unit/Branch Target Buffer/Subthreshold Leakage'),
-    'l2_runtime_dynamic':               _pd('L2', 'Runtime Dynamic'),
-    'l2_peak_dynamic':                  _pd('L2', 'Peak Dynamic'),
-    'l2_subthreshold_leakage':          _pd('L2', 'Subthreshold Leakage'),
-    'l3_runtime_dynamic':               _pd('L3', 'Runtime Dynamic'),
-    'l3_peak_dynamic':                  _pd('L3', 'Peak Dynamic'),
-    'l3_subthreshold_leakage':          _pd('L3', 'Subthreshold Leakage'),
-  }
+  # power_dat stores Core/L2/L3 as a LIST (one entry per instance) and everything else
+  # as a dict -- see the componentname handling above. Per-instance components are
+  # therefore emitted per core ("<name>_core<i>"), matching the per-core columns the
+  # model was trained on; chip-wide components are emitted once under the bare name.
+  def _dict_stat(d, stat):
+    try:
+      return float(d.get(stat, 0.0) or 0.0)
+    except (TypeError, ValueError):
+      return 0.0
+
+  power_features = {}
+
+  for feat, stat in (
+      ('total_runtime_dynamic',  'Runtime Dynamic'),
+      ('total_peak_dynamic',     'Peak Dynamic'),
+      ('total_leakage',          'Total Leakage'),
+      ('runtime_dynamic',        'Runtime Dynamic'),
+      ('subthreshold_leakage',   'Subthreshold Leakage'),
+      ('gate_leakage',           'Gate Leakage'),
+  ):
+    power_features[feat] = _dict_stat(power_dat.get('Processor', {}), stat)
+
+  for feat, component, stat in (
+      ('execution_unit_runtime_dynamic',   'Core', 'Execution Unit/Runtime Dynamic'),
+      ('ifu_runtime_dynamic',              'Core', 'Instruction Fetch Unit/Runtime Dynamic'),
+      ('load_store_unit_runtime_dynamic',  'Core', 'Load Store Unit/Runtime Dynamic'),
+      ('branch_predictor_runtime_dynamic', 'Core', 'Instruction Fetch Unit/Branch Predictor/Runtime Dynamic'),
+      ('btb_runtime_dynamic',              'Core', 'Instruction Fetch Unit/Branch Target Buffer/Runtime Dynamic'),
+      ('btb_subthreshold_leakage',         'Core', 'Instruction Fetch Unit/Branch Target Buffer/Subthreshold Leakage'),
+      # L2 is reported INSIDE each Core block (verified against real output), so it
+      # parses as an "L2/..." prefix within Core -- not as a top-level component.
+      ('l2_runtime_dynamic',               'Core', 'L2/Runtime Dynamic'),
+      ('l2_peak_dynamic',                  'Core', 'L2/Peak Dynamic'),
+      ('l2_subthreshold_leakage',          'Core', 'L2/Subthreshold Leakage'),
+      ('l3_runtime_dynamic',               'L3',   'Runtime Dynamic'),
+      ('l3_peak_dynamic',                  'L3',   'Peak Dynamic'),
+      ('l3_subthreshold_leakage',          'L3',   'Subthreshold Leakage'),
+  ):
+    entries = power_dat.get(component, [])
+    if isinstance(entries, dict):        # defensive: single-instance form
+      entries = [entries]
+    total = 0.0
+    for i, d in enumerate(entries):
+      v = _dict_stat(d, stat)
+      power_features['%s_core%d' % (feat, i)] = v
+      total += v
+    # bare name = chip-wide total, used for any core with no per-instance entry
+    # (notably L3, which exists once and is shared by every core)
+    power_features[feat] = total
+
   f_json = file(outputfile + '.features.json', 'w')
   f_json.write('{\n')
   f_json.write(',\n'.join('  "%s": %.9g' % (k, v) for k, v in sorted(power_features.items())))

@@ -2343,8 +2343,20 @@ CacheCntlr::reconfigure(UInt64 new_capacity_bytes)
 	lock.release();
 
 	if (effective_ways != target_ways)
-		LOG_PRINT_WARNING("reconfigure(core %d): requested %u active ways, clamped to %u (live data in use)",
-			m_core_id, target_ways, effective_ways);
+	{
+		// Two different clamps, previously reported with one (wrong) message. Growing
+		// past the physically allocated associativity is normal and expected -- the
+		// model asks in bytes and simply wants "as large as possible" -- and has
+		// nothing to do with live data, which the old text claimed in both cases.
+		if (target_ways > effective_ways && effective_ways == cache->getAssociativity())
+			LOG_PRINT("reconfigure(core %d): requested %u ways, capped at the cache's %u "
+				"physical ways (grow-to-max, not a clamp)",
+				m_core_id, target_ways, effective_ways);
+		else
+			LOG_PRINT_WARNING("reconfigure(core %d): requested %u active ways, raised to %u "
+				"(shrink refused -- those ways still hold live data)",
+				m_core_id, target_ways, effective_ways);
+	}
 
 	if (effective_ways != old_ways)
 	{

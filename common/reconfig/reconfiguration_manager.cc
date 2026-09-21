@@ -624,13 +624,34 @@ void ReconfigurationManager::dumpIntervalStats(const std::string& output_file)
                (unsigned long long)l2_usage, (unsigned long long)l3_usage,
                l2_evict_rate, l2_hit_rate, norm_fp, norm_mem, norm_int, norm_ctrl);
       entry += buf;
-      // McPAT figures for the interval just ended. Chip-wide values, replicated per
-      // core because that is the shape the per-core training rows had.
-      for (std::map<std::string, double>::const_iterator it = m_last_power_features.begin();
-           it != m_last_power_features.end(); ++it)
+      // McPAT figures for the interval just ended. mcpat.py emits per-instance
+      // components as "<name>_core<i>" and chip-wide ones under the bare name, so take
+      // this core's entry where one exists and the chip-wide value otherwise (notably
+      // L3, which is a single shared instance).
       {
-         snprintf(buf, sizeof(buf), ", \"%s_prev\": %g", it->first.c_str(), it->second);
-         entry += buf;
+         char suffix[32];
+         snprintf(suffix, sizeof(suffix), "_core%d", core_id);
+         std::string my_suffix(suffix);
+         for (std::map<std::string, double>::const_iterator it = m_last_power_features.begin();
+              it != m_last_power_features.end(); ++it)
+         {
+            const std::string &k = it->first;
+            size_t core_pos = k.rfind("_core");
+            bool is_percore = (core_pos != std::string::npos);
+            std::string feat = k;
+            if (is_percore)
+            {
+               if (k.compare(core_pos, std::string::npos, my_suffix) != 0)
+                  continue;                       // another core's entry
+               feat = k.substr(0, core_pos);
+            }
+            else if (m_last_power_features.count(k + my_suffix))
+            {
+               continue;                          // per-core entry exists; prefer it
+            }
+            snprintf(buf, sizeof(buf), ", \"%s_prev\": %g", feat.c_str(), it->second);
+            entry += buf;
+         }
       }
       {
          // ppw = ips^3 / total power, matching addCalculatedColumnsToMergedCsv.py.

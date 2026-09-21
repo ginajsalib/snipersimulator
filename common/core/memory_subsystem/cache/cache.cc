@@ -202,11 +202,11 @@ Cache::setActiveWays(UInt32 target_ways)
 
 	UInt32 effective_ways = target_ways;
 	if (effective_ways < max_used_ways)
-		effective_ways = max_used_ways;
+		effective_ways = max_used_ways;   // shrink refused: those ways still hold data
 	if (effective_ways < 1)
 		effective_ways = 1;
 	if (effective_ways > getAssociativity())
-		effective_ways = getAssociativity(); // can't enable more ways than were ever allocated
+		effective_ways = getAssociativity(); // growth capped: no more ways physically exist
 
 	for (UInt32 set_index = 0; set_index < m_num_sets; set_index++)
 		m_sets[set_index]->setActiveWays(effective_ways);
