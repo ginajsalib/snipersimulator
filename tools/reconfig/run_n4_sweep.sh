@@ -27,6 +27,7 @@ BENCHMARKS=""
 ICOUNT=1000000000
 DRYRUN=0
 INPUT=small
+CORE_MODEL=rob
 TAG=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,6 +35,7 @@ while [ $# -gt 0 ]; do
     --benchmarks) BENCHMARKS="$2"; shift 2 ;;
     --icount) ICOUNT="$2"; shift 2 ;;
     --input) INPUT="$2"; shift 2 ;;
+    --core-model) CORE_MODEL="$2"; shift 2 ;;
     --tag) TAG="_$2"; shift 2 ;;
     --dry-run) DRYRUN=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
@@ -65,6 +67,7 @@ echo "benchmarks: $BENCHMARKS"
 echo "arms      : $ARMS"
 echo "icount    : $ICOUNT"
 echo "input     : $INPUT"
+echo "core model: $CORE_MODEL"
 echo "results   : $RESULTS_ROOT"
 [ "$DRYRUN" = "1" ] && { echo "(dry run -- nothing executed)"; exit 0; }
 
@@ -79,7 +82,7 @@ for bench in $BENCHMARKS; do
     echo "== $bench / $arm   ($(date '+%F %T'))"
     echo "======================================================================"
 
-    if ICOUNT=$ICOUNT INPUT=$INPUT bash "$SNIPER_ROOT/tools/reconfig/run_n4_hetero.sh" "$bench" "$arm"; then
+    if ICOUNT=$ICOUNT INPUT=$INPUT CORE_MODEL=$CORE_MODEL bash "$SNIPER_ROOT/tools/reconfig/run_n4_hetero.sh" "$bench" "$arm"; then
       d=$RESULTS_ROOT/$bench/$arm
       n=$(ls "$d"/power-*.txt 2>/dev/null | wc -l)
       # A run that segfaults still leaves power files behind, so completion is judged by

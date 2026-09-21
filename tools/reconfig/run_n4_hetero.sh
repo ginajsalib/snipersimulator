@@ -31,6 +31,12 @@ INPUT="${INPUT:-small}"
 # SHRINK_POLICY: clamp (default, refuse shrinks that do not fit) | flush (evict the
 # ways being gated first). See config/base.cfg's [reconfig] section.
 SHRINK_POLICY="${SHRINK_POLICY:-clamp}"
+# CORE_MODEL: rob (default) matches the core model the training sweep was collected
+# under (runSniperWithCfg.sh used -c rob) and supplies the seven rob_timer.uop_*
+# features the model was trained on, which do not exist under interval. Reconfiguration
+# works under both since the tick was added to RobPerformanceModel. Set to "interval"
+# to reproduce the older runs.
+CORE_MODEL="${CORE_MODEL:-rob}"
 BENCH="${1:?usage: run_n4_hetero.sh <benchmark> <arm>}"
 ARM="${2:?usage: run_n4_hetero.sh <benchmark> <arm>}"
 
@@ -146,7 +152,10 @@ OUTDIR=$RESULTS_ROOT/$BENCH/$ARM
 rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"
 
-/root/benchmarks/run-sniper --benchmarks "splash2-${BENCH}-${INPUT}-4" -n 4 -c gainestown \
+ROB_CFG=""
+[ "$CORE_MODEL" = "rob" ] && ROB_CFG="-c rob"
+
+/root/benchmarks/run-sniper --benchmarks "splash2-${BENCH}-${INPUT}-4" -n 4 -c gainestown $ROB_CFG \
   -c hc0,hc1,hc2,hc3 \
   -s stop-by-icount:$ICOUNT \
   -d "$OUTDIR" \
@@ -166,7 +175,7 @@ mkdir -p "$OUTDIR"
   -greconfig/live_config_path="$OUTDIR/sniper_reconfig_live.cfg"
 
 echo
-echo "=== $BENCH / $ARM (input=$INPUT) done -> $OUTDIR ==="
+echo "=== $BENCH / $ARM (input=$INPUT, core=$CORE_MODEL) done -> $OUTDIR ==="
 echo "per-core config actually applied (check the [] arrays are 4 wide and asymmetric):"
 grep -E "^(frequency|dispatch_width|window_size|cache_size|num_entries|prefetcher)" "$OUTDIR/sim.cfg" | head -20
 echo "failed predictions (must be 0 for dynamic_rf):"
