@@ -28,6 +28,9 @@ ICOUNT="${ICOUNT:-1000000000}"
 # cholesky's 514, so their PPW rested on a handful of McPAT samples. "large" is
 # fft -m22 (~20x the work) and radix -n1048576 (4x).
 INPUT="${INPUT:-small}"
+# SHRINK_POLICY: clamp (default, refuse shrinks that do not fit) | flush (evict the
+# ways being gated first). See config/base.cfg's [reconfig] section.
+SHRINK_POLICY="${SHRINK_POLICY:-clamp}"
 BENCH="${1:?usage: run_n4_hetero.sh <benchmark> <arm>}"
 ARM="${2:?usage: run_n4_hetero.sh <benchmark> <arm>}"
 
@@ -155,6 +158,7 @@ mkdir -p "$OUTDIR"
   -g perf_model/l2_cache/prefetcher/simple/flows_per_core=false \
   -g general/max_instructions=$ICOUNT \
   -g perf_model/l3_cache/cache_size=$L3_KB \
+  -greconfig/shrink_policy=$SHRINK_POLICY \
   -greconfig/enabled=true \
   -greconfig/python_hook_script=$HOOK \
   -greconfig/mcpat_script_path=$SNIPER_ROOT/tools/mcpat.py \

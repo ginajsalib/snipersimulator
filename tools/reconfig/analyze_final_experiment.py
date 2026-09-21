@@ -503,6 +503,57 @@ def diagnose_decisions(benchmark, dynamic_rf_dir, no_change_dir, best_static_dir
             'mean_gap_vs_best_static': _mean(all_gaps_vs_bs) if all_gaps_vs_bs else None}
 
 
+def shrink_policy_ab(root):
+    """Compare reconfig/shrink_policy=clamp vs flush, per benchmark, under
+    results/<bench>/{clamp,flush}. Both arms are dynamic_rf with an identical starting
+    config, so the only difference is whether a shrink that doesn't fit is refused
+    (clamp) or made to fit by evicting first (flush)."""
+    benches = sorted(d for d in os.listdir(root)
+                     if os.path.isdir(os.path.join(root, d)) and not d.startswith('.'))
+    print('=' * 86)
+    print('SHRINK POLICY A/B  --  clamp (refuse shrink) vs flush (evict, then shrink)')
+    print('=' * 86)
+    print('  %-12s %10s %7s %7s %12s %12s %9s' % (
+        'benchmark', 'policy', 'ivals', 'moves', 'PPW', 'IPS', 'power W'))
+    rows = {}
+    for bench in benches:
+        for policy in ('clamp', 'flush'):
+            d = os.path.join(root, bench, policy)
+            if not os.path.isdir(d) or not os.path.exists(os.path.join(d, 'sim.out')):
+                continue
+            s = summarize_run(d, label='%s/%s' % (bench, policy), quiet=True)
+            if not s or not s['ppw_run']:
+                continue
+            rows[(bench, policy)] = s
+            moves = _run_transitions(d)
+            print('  %-12s %10s %7d %7s %12s %12s %9.2f' % (
+                bench, policy, s['n_intervals'], '-' if moves is None else moves,
+                _fmt(s['ppw_run']), _fmt(s['whole_run_ips']),
+                s['whole_run_power_dynamic_w']))
+    print('')
+    print('  %-12s %14s %14s   %s' % ('benchmark', 'PPW(clamp)', 'PPW(flush)', 'flush vs clamp'))
+    ratios = []
+    for bench in benches:
+        c, f = rows.get((bench, 'clamp')), rows.get((bench, 'flush'))
+        if not c or not f:
+            continue
+        r = f['ppw_run'] / c['ppw_run']
+        ratios.append(r)
+        print('  %-12s %14s %14s   %+.2f%%' % (
+            bench, _fmt(c['ppw_run']), _fmt(f['ppw_run']), (r - 1) * 100.0))
+    if ratios:
+        import math
+        gm = math.exp(sum(math.log(x) for x in ratios) / len(ratios))
+        print('')
+        print('  geomean flush / clamp = %.4fx  (%+.2f%%, n=%d)' % (gm, (gm - 1) * 100.0, len(ratios)))
+        print('')
+        print('  Reading it: flush only helps if the model\'s shrink requests were both')
+        print('  correct AND being refused under clamp. A negative result means either the')
+        print('  shrinks were wrong, or the eviction traffic cost more than the smaller')
+        print('  cache saved -- check the flushed-line counts in status.csv to tell which.')
+    return rows
+
+
 def compare_arms(benchmark, arms, oracle_ppw=None):
     """arms: {'no_change': dir, 'best_static': dir, 'dynamic_rf': dir,
     ['max_resources': dir]}. Prints FINAL_EXPERIMENT.md's three headline metrics."""
@@ -713,6 +764,9 @@ def main():
     p3.add_argument('--best-static', dest='best_static', default=None,
                      help='Optional: also report average headroom left vs best_static')
 
+    p5 = sub.add_parser('shrink-ab', help='Compare shrink_policy clamp vs flush')
+    p5.add_argument('--root', required=True)
+
     p4 = sub.add_parser('sweep', help='Tabulate every benchmark under a results root '
                                        '(e.g. results/n4_hetero) vs each baseline')
     p4.add_argument('--root', required=True)
@@ -732,6 +786,8 @@ def main():
         diagnose_decisions(args.benchmark, args.dynamic_rf, args.no_change, args.best_static)
     elif args.cmd == 'sweep':
         sweep_summary(args.root)
+    elif args.cmd == 'shrink-ab':
+        shrink_policy_ab(args.root)
     else:
         ap.print_help()
         sys.exit(1)
