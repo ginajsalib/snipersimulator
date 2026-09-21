@@ -2315,9 +2315,30 @@ CacheCntlr::reconfigure(UInt64 new_capacity_bytes)
 	UInt32 num_sets = cache->getNumSets();
 	UInt32 target_ways = (UInt32)(new_capacity_bytes / ((UInt64)num_sets * m_cache_block_size));
 
+	UInt32 old_ways = cache->getActiveWays();
+
+	// reconfig/shrink_policy:
+	//   clamp (default) -- a shrink that does not fit is refused; Cache::setActiveWays()
+	//                      raises it to the highest occupied way. Never evicts anything,
+	//                      but on a warm cache a single fully-occupied set pins the whole
+	//                      cache, so shrinks become near-permanent no-ops.
+	//   flush           -- evict the ways being gated first, so the shrink actually takes
+	//                      effect. Costs real writeback/back-invalidation traffic.
+	// Read per call (once per reconfiguration interval, not on any hot path).
+	bool flush_policy = false;
+	if (Sim()->getCfg()->hasKey("reconfig/shrink_policy"))
+		flush_policy = (Sim()->getCfg()->getString("reconfig/shrink_policy") == "flush");
+
+	UInt64 flushed = 0, dirty_flushed = 0;
+	if (flush_policy && target_ways < old_ways)
+	{
+		// Must run BEFORE taking m_cache_lock: the eviction path below acquires it
+		// (and the previous levels' locks) itself.
+		flushWaysForReconfig(target_ways, old_ways, flushed, dirty_flushed);
+	}
+
 	Lock &lock = m_master->m_cache_lock;
 	lock.acquire();
-	UInt32 old_ways = cache->getActiveWays();
 	UInt32 effective_ways = cache->setActiveWays(target_ways);
 	lock.release();
 
@@ -2327,14 +2348,94 @@ CacheCntlr::reconfigure(UInt64 new_capacity_bytes)
 
 	if (effective_ways != old_ways)
 	{
-		// Fixed control-plane/power-gating overhead, not a data-flush cost: shrinking
-		// never forces an eviction (see Cache::setActiveWays()), so there's nothing to
-		// write back here.
+		// Base cost is the fixed control-plane/power-gating overhead. Under shrink_policy
+		// = flush there is also a data cost; the bulk of it (writebacks to the next level
+		// / DRAM, back-invalidations) is already charged through the normal memory model
+		// by flushWaysForReconfig(), so the per-line knobs below default to 0 to avoid
+		// double-counting, and exist for studying an explicit additional flush overhead.
 		UInt64 penalty_cycles = Sim()->getCfg()->getIntArray("reconfig/transition_penalty_cycles", m_core_id);
+		if (flushed)
+		{
+			UInt64 per_line = Sim()->getCfg()->hasKey("reconfig/flush_penalty_cycles_per_line")
+				? Sim()->getCfg()->getInt("reconfig/flush_penalty_cycles_per_line") : 0;
+			UInt64 per_dirty = Sim()->getCfg()->hasKey("reconfig/flush_penalty_cycles_per_dirty_line")
+				? Sim()->getCfg()->getInt("reconfig/flush_penalty_cycles_per_dirty_line") : 0;
+			penalty_cycles += flushed * per_line + dirty_flushed * per_dirty;
+		}
 		SubsecondTime penalty = ComponentLatency(Sim()->getDvfsManager()->getCoreDomain(m_core_id), penalty_cycles).getLatency();
 		Core *core = Sim()->getCoreManager()->getCoreFromID(m_core_id);
 		if (core && core->getPerformanceModel())
 			core->getPerformanceModel()->applyReconfigPenalty(penalty);
+	}
+
+	if (flushed)
+		fprintf(stderr, "[reconfig] core %d flush-shrink %u -> %u ways: %llu lines evicted (%llu dirty)\n",
+			m_core_id, old_ways, effective_ways,
+			(unsigned long long)flushed, (unsigned long long)dirty_flushed);
+}
+
+void
+CacheCntlr::flushWaysForReconfig(UInt32 target_ways, UInt32 old_ways,
+                                 UInt64 &flushed, UInt64 &dirty_flushed)
+{
+	Cache *cache = m_master->m_cache;
+	ShmemPerfModel::Thread_t thread_num = ShmemPerfModel::_USER_THREAD;
+	flushed = dirty_flushed = 0;
+
+	for (UInt32 set_index = 0; set_index < cache->getNumSets(); set_index++)
+	{
+		for (UInt32 way = target_ways; way < old_ways; way++)
+		{
+			CacheBlockInfo *block_info = cache->peekBlock(set_index, way);
+			if (!block_info || !block_info->isValid())
+				continue;
+
+			IntPtr addr = cache->tagToAddress(block_info->getTag());
+			bool was_modified = (block_info->getCState() == CacheState::MODIFIED);
+
+			if (m_next_cache_cntlr)
+			{
+				// updateCacheBlock() does the whole job for a non-last level: it
+				// back-invalidates every previous level (rewriting the reason to
+				// BACK_INVAL for them), writes MODIFIED data into the next level, then
+				// invalidates locally and notifies the next level of the evict.
+				updateCacheBlock(addr, CacheState::INVALID, Transition::EVICT, NULL, thread_num);
+			}
+			else
+			{
+				// Last level: nothing below to absorb the data, so updateCacheBlock()
+				// needs a buffer to hand it back, and the directory must be told --
+				// mirroring insertCacheBlock()'s eviction tail.
+				Byte evict_buf[getCacheBlockSize()];
+				updateCacheBlock(addr, CacheState::INVALID, Transition::EVICT, evict_buf, thread_num);
+
+				if (m_master->m_dram_cntlr)
+				{
+					if (was_modified)
+					{
+						HitWhere::where_t hit_where;
+						SubsecondTime dram_latency;
+						boost::tie<HitWhere::where_t, SubsecondTime>(hit_where, dram_latency) =
+							accessDRAM(Core::WRITE, addr, false, evict_buf);
+					}
+				}
+				else
+				{
+					UInt32 home_node_id = getHome(addr);
+					getMemoryManager()->sendMsg(
+						was_modified ? PrL1PrL2DramDirectoryMSI::ShmemMsg::FLUSH_REP
+						             : PrL1PrL2DramDirectoryMSI::ShmemMsg::INV_REP,
+						MemComponent::LAST_LEVEL_CACHE, MemComponent::TAG_DIR,
+						m_core_id /* requester */, home_node_id /* receiver */, addr,
+						was_modified ? evict_buf : NULL, was_modified ? getCacheBlockSize() : 0,
+						HitWhere::UNKNOWN, &m_dummy_shmem_perf, thread_num);
+				}
+			}
+
+			flushed++;
+			if (was_modified)
+				dirty_flushed++;
+		}
 	}
 }
 

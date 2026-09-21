@@ -411,6 +411,14 @@ namespace ParametricDramDirectoryMSI
          // actually free (see Cache::setActiveWays()); charges a small fixed transition
          // penalty, not a dirty-line writeback cost, since nothing is ever forcibly evicted.
          void reconfigure(UInt64 new_capacity_bytes);
+
+         // Evict every valid line in ways [target_ways, old_ways) across all sets, so a
+         // subsequent setActiveWays(target_ways) is not clamped. Only used when
+         // reconfig/shrink_policy = flush. Returns lines flushed / of which dirty.
+         // Each eviction reuses the same coherence path insertCacheBlock() runs on every
+         // normal capacity eviction -- NOT a parallel reimplementation.
+         void flushWaysForReconfig(UInt32 target_ways, UInt32 old_ways,
+                                   UInt64 &flushed, UInt64 &dirty_flushed);
          void reconfigurePrefetcher(String new_type, String configName);
 
          friend class CacheCntlrList;
