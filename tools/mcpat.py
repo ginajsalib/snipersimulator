@@ -206,6 +206,40 @@ def main(jobid, resultsdir, outputfile, powertype = 'dynamic', config = None, no
   # Write back
   file(outputfile + '.py', 'w').write("power = " + pprint.pformat(power_dat))
 
+  # Flat JSON sidecar of just the power figures the RF model was trained on, so
+  # ReconfigurationManager can feed them into the next interval's prediction without
+  # reimplementing this parser in C++ (its hand-rolled JSON extractor already handles
+  # a flat number map). Keys are the training column names minus the "_prev" suffix.
+  # Missing components resolve to 0.0 rather than being omitted, so the C++ side never
+  # has to distinguish "absent" from "zero".
+  def _pd(component, stat):
+    return float(power_dat.get(component, {}).get(stat, 0.0) or 0.0)
+  power_features = {
+    'total_runtime_dynamic':            _pd('Processor', 'Runtime Dynamic'),
+    'total_peak_dynamic':               _pd('Processor', 'Peak Dynamic'),
+    'total_leakage':                    _pd('Processor', 'Total Leakage'),
+    'runtime_dynamic':                  _pd('Processor', 'Runtime Dynamic'),
+    'subthreshold_leakage':             _pd('Processor', 'Subthreshold Leakage'),
+    'gate_leakage':                     _pd('Processor', 'Gate Leakage'),
+    'execution_unit_runtime_dynamic':   _pd('Core', 'Execution Unit/Runtime Dynamic'),
+    'ifu_runtime_dynamic':              _pd('Core', 'Instruction Fetch Unit/Runtime Dynamic'),
+    'load_store_unit_runtime_dynamic':  _pd('Core', 'Load Store Unit/Runtime Dynamic'),
+    'branch_predictor_runtime_dynamic': _pd('Core', 'Instruction Fetch Unit/Branch Predictor/Runtime Dynamic'),
+    'btb_runtime_dynamic':              _pd('Core', 'Instruction Fetch Unit/Branch Target Buffer/Runtime Dynamic'),
+    'btb_subthreshold_leakage':         _pd('Core', 'Instruction Fetch Unit/Branch Target Buffer/Subthreshold Leakage'),
+    'l2_runtime_dynamic':               _pd('L2', 'Runtime Dynamic'),
+    'l2_peak_dynamic':                  _pd('L2', 'Peak Dynamic'),
+    'l2_subthreshold_leakage':          _pd('L2', 'Subthreshold Leakage'),
+    'l3_runtime_dynamic':               _pd('L3', 'Runtime Dynamic'),
+    'l3_peak_dynamic':                  _pd('L3', 'Peak Dynamic'),
+    'l3_subthreshold_leakage':          _pd('L3', 'Subthreshold Leakage'),
+  }
+  f_json = file(outputfile + '.features.json', 'w')
+  f_json.write('{\n')
+  f_json.write(',\n'.join('  "%s": %.9g' % (k, v) for k, v in sorted(power_features.items())))
+  f_json.write('\n}\n')
+  f_json.close()
+
 
   # Build stack
   ncores = int(results['config']['general/total_cores'])

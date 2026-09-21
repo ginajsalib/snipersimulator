@@ -12,6 +12,7 @@
 
 #include "fixed_types.h"
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -46,6 +47,20 @@ private:
    };
    std::vector<CoreCounters> m_prev;
    bool m_have_prev;
+
+   // Previous interval's raw Sniper counters, keyed by TRAINING feature name (e.g.
+   // "L2.loads"), indexed by core_id. The model was trained on per-interval deltas of
+   // the full stats dump that periodicins-stats.py wrote during the sweep, so the live
+   // path has to reproduce those same counters under those same names -- emitting
+   // hand-derived rates instead is what left ~94.7% of the model's 567 input features
+   // zero-filled by rf_predict_ncore.py's align_to_scaler().
+   std::vector<std::map<std::string, UInt64> > m_prev_raw;
+
+   // Feature names the model expects, in "<stats object>.<metric>" form. The object is
+   // everything before the first '.', the metric the remainder, so this doubles as the
+   // readMetric() lookup table. Emitted as "<name>_prev" (the training suffix).
+   static const char* const RAW_METRIC_FEATURES[];
+   static UInt32 numRawMetricFeatures();
 
    // Last-applied values that aren't otherwise queryable from the live objects
    // (Cache::getActiveWays() covers current L2/L3 capacity directly, so those aren't
@@ -121,6 +136,14 @@ private:
    // --partial=<prev marker>:<this marker> -c m_live_config_path, so every McPAT power
    // sample corresponds to exactly one reconfiguration interval.
    void triggerPowerSample();
+
+   // Path of the .features.json sidecar mcpat.py wrote for the most recent power
+   // sample, and the values parsed out of it. The model was trained with the previous
+   // interval's McPAT figures as inputs, so triggerPowerSample() has to run BEFORE the
+   // prediction and its output be folded into dumpIntervalStats()'s JSON.
+   std::string m_last_power_features_path;
+   std::map<std::string, double> m_last_power_features;
+   void loadPowerFeatures();
 
    static UInt64 readMetric(const char* category, core_id_t core_id, const char* metric);
 

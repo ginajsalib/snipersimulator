@@ -155,6 +155,21 @@ def _own_metrics_for_core(core_entry):
             out[real_key] = float(core_entry[our_key])
         except (TypeError, ValueError):
             out[real_key] = np.nan
+
+    # Pass through anything dumpIntervalStats() already emitted under its real training
+    # column name (every raw counter it writes is suffixed "_prev", e.g. "L2.loads_prev").
+    # Without this only the three aliased config features above ever reached the model and
+    # align_to_scaler() zero-filled the other ~94.7% of its 567 inputs, so the prediction
+    # was constant regardless of workload.
+    for key, value in core_entry.items():
+        if not key.endswith('_prev') or key in out:
+            continue
+        if key in OWN_METRIC_ALIASES:      # handled above, under its aliased name
+            continue
+        try:
+            out[key] = float(value)
+        except (TypeError, ValueError):
+            out[key] = np.nan
     return out
 
 
@@ -165,7 +180,14 @@ def _sibling_aggregate(cores, exclude_core_id):
     pd.to_numeric(..., errors='coerce')."""
     siblings = [c for c in cores if c.get('core_id') != exclude_core_id]
     out = {}
-    for our_key, real_key in OWN_METRIC_ALIASES.items():
+    # The 3 aliased config metrics plus every real-named "_prev" column the C++ side
+    # emits; training aggregated over all per-core columns, not just the config ones.
+    agg_keys = dict(OWN_METRIC_ALIASES)
+    for c in cores:
+        for key in c.keys():
+            if key.endswith('_prev') and key not in agg_keys and key not in OWN_METRIC_ALIASES.values():
+                agg_keys[key] = key
+    for our_key, real_key in agg_keys.items():
         vals = []
         for c in siblings:
             if our_key not in c:
@@ -188,7 +210,13 @@ def _sibling_aggregate(cores, exclude_core_id):
         out['%s__iqr' % real_key] = p75 - p25
         out['%s__max' % real_key] = mx
         out['%s__min' % real_key] = mn
-        if our_key in COUNT_LIKE_METRICS:
+        # Training summed every count-like column, which is all of the raw counters
+        # (loads/stores/misses/instructions/...), not just the two config metrics that
+        # used to be listed here. Over-producing is harmless -- align_to_scaler() keeps
+        # only the columns the scaler expects -- whereas under-producing silently leaves
+        # those features zero-filled, which is the bug this whole change exists to fix.
+        if our_key in COUNT_LIKE_METRICS or (
+                our_key == real_key and real_key != 'Prefetch _prev'):
             out['%s__sum' % real_key] = np.nansum(arr) if not np.all(np.isnan(arr)) else np.nan
     return out
 
@@ -206,7 +234,12 @@ def build_percore_row(stats, core_entry):
     sibling_agg = _sibling_aggregate(cores, core_id)
     row.update(sibling_agg)
 
-    for our_key, real_key in OWN_METRIC_ALIASES.items():
+    # own-vs-sibling deltas for every own column, not only the three aliased ones
+    delta_keys = dict(OWN_METRIC_ALIASES)
+    for key in row.keys():
+        if key.endswith('_prev') and key not in delta_keys.values():
+            delta_keys[key] = key
+    for our_key, real_key in delta_keys.items():
         if real_key not in row:
             continue
         med_col, max_col = '%s__median' % real_key, '%s__max' % real_key

@@ -60,6 +60,7 @@ void ReconfigurationManager::initialize()
 
    UInt32 total_cores = Sim()->getConfig()->getTotalCores();
    m_prev.assign(total_cores, CoreCounters());
+   m_prev_raw.assign(total_cores, std::map<std::string, UInt64>());
    m_current_btb_entries.resize(total_cores);
    m_current_prefetch_type.resize(total_cores);
    m_last_snapshot.ipc.resize(total_cores);
@@ -91,14 +92,21 @@ SInt64 ReconfigurationManager::handleReconfiguration(core_id_t core_id)
 {
    LOG_PRINT("Reconfiguration triggered for core %d", core_id);
 
+   // McPAT first: the model's power features describe the interval that just ENDED, and
+   // writeLiveConfigSnapshot() must therefore describe the config that interval ran
+   // under (i.e. pre-apply). Running this after the prediction -- as it used to -- both
+   // billed the interval against the next config and left all 18 power features
+   // zero-filled at the predictor.
+   writeLiveConfigSnapshot();
+   triggerPowerSample();
+   loadPowerFeatures();
+
    dumpIntervalStats(m_stats_output_path);
 
    if (!runPythonPrediction(m_python_script_path))
    {
       LOG_PRINT_WARNING("RF prediction failed, skipping reconfiguration this interval");
       logDecision("predict_failed", NULL);
-      writeLiveConfigSnapshot();
-      triggerPowerSample();
       m_interval_index++;
       return -1;
    }
@@ -108,20 +116,9 @@ SInt64 ReconfigurationManager::handleReconfiguration(core_id_t core_id)
    {
       LOG_PRINT_WARNING("Failed to read predicted config JSON, skipping reconfiguration this interval");
       logDecision("parse_failed", NULL);
-      writeLiveConfigSnapshot();
-      triggerPowerSample();
       m_interval_index++;
       return -1;
    }
-
-   // Power-sample BEFORE applying: triggerPowerSample()'s --partial window covers the
-   // interval that just ELAPSED, which ran under the pre-apply config, so that's the
-   // config McPAT must be given via -c. Snapshotting after applyReconfiguration() (as
-   // this did originally) billed each interval's activity counters against the *next*
-   // interval's geometry -- harmless when nothing changed, but wrong on exactly the
-   // intervals where a reconfiguration was applied. See tools/reconfig/CACHE_COHERENCE_AUDIT.md.
-   writeLiveConfigSnapshot();
-   triggerPowerSample();
 
    applyReconfiguration(predicted);
    logDecision("applied", &predicted);
@@ -313,6 +310,11 @@ void ReconfigurationManager::triggerPowerSample()
    UInt64 duration_ns = now_ns - m_prev_time_marker_ns;
 
    char cmd[2048];
+   char outbase[1024];
+   snprintf(outbase, sizeof(outbase), "%s/power-%s-%s-%llu", output_dir.c_str(),
+            m_prev_time_marker.c_str(), this_marker.c_str(), (unsigned long long)duration_ns);
+   m_last_power_features_path = std::string(outbase) + ".features.json";
+
    snprintf(cmd, sizeof(cmd),
       "python2 %s -d %s -o %s/power-%s-%s-%llu -c %s --partial=%s:%s --no-graph",
       m_mcpat_script_path.c_str(), output_dir.c_str(), output_dir.c_str(),
@@ -343,6 +345,79 @@ UInt64 ReconfigurationManager::readMetric(const char* category, core_id_t core_i
       return 0;
    }
    return m->recordMetric();
+}
+
+// Exactly the raw counters the per-core scaler was fitted on (derived from
+// ncore_*_percore_scaler.pkl's feature_names_in_, minus the sibling-aggregate suffixes
+// the predictor recomputes itself). Emitted as "<name>_prev" per core.
+//
+// NOT emitted, and therefore still zero-filled at the predictor: the 18 McPAT power
+// features (*_runtime_dynamic, *_subthreshold_leakage, *_peak_dynamic), ppw_prev, the
+// benchmark categorical, and the normalized_commit_* / l2_most_usage / l2_most_hit_rate
+// / l2_avg_eviction_rate / l3_usage family, whose training-time definitions are not
+// recorded in any surviving script -- guessing them would be worse than leaving them 0.
+void ReconfigurationManager::loadPowerFeatures()
+{
+   // Parse the flat {"name": number} sidecar mcpat.py writes next to each power-*.txt.
+   // Deliberately tolerant: a missing or malformed file leaves the previous interval's
+   // values in place rather than zeroing them, since a single failed McPAT run should
+   // not make the model's power inputs discontinuous.
+   if (m_last_power_features_path.empty())
+      return;
+   std::ifstream in(m_last_power_features_path.c_str());
+   if (!in.good())
+   {
+      static bool warned = false;
+      if (!warned)
+      {
+         warned = true;
+         fprintf(stderr, "[reconfig] WARNING: no McPAT feature sidecar at %s -- the 18 "
+                         "power features stay zero (is tools/mcpat.py current?)\n",
+                 m_last_power_features_path.c_str());
+      }
+      return;
+   }
+   std::stringstream ss;
+   ss << in.rdbuf();
+   std::string content = ss.str();
+
+   size_t pos = 0;
+   while ((pos = content.find('"', pos)) != std::string::npos)
+   {
+      size_t key_end = content.find('"', pos + 1);
+      if (key_end == std::string::npos)
+         break;
+      std::string key = content.substr(pos + 1, key_end - pos - 1);
+      size_t colon = content.find(':', key_end);
+      if (colon == std::string::npos)
+         break;
+      m_last_power_features[key] = strtod(content.c_str() + colon + 1, NULL);
+      pos = content.find('\n', colon);
+      if (pos == std::string::npos)
+         break;
+   }
+}
+
+const char* const ReconfigurationManager::RAW_METRIC_FEATURES[] = {
+   "L1-D.loads", "L1-D.stores",
+   "L2.loads", "L2.stores", "L2.load-misses", "L2.store-misses",
+   "L2.evict-E", "L2.evict-I", "L2.evict-M", "L2.evict-O",
+   "L2.evict-S", "L2.evict-prefetch", "L2.evict-u", "L2.evict-warmup",
+   "L3.loads", "L3.stores", "L3.load-misses", "L3.store-misses",
+   "branch_predictor.num-correct", "branch_predictor.num-incorrect",
+   "core.instructions",
+   "performance_model.elapsed_time", "performance_model.idle_elapsed_time",
+   "performance_model.instruction_count",
+   // Only registered under perf_model/core/type = rob. Absent (and warned about once)
+   // under interval -- see FINAL_EXPERIMENT.md's resolved core-model mismatch entry.
+   "rob_timer.uop_branch", "rob_timer.uop_fp_addsub", "rob_timer.uop_fp_muldiv",
+   "rob_timer.uop_generic", "rob_timer.uop_load", "rob_timer.uop_store",
+   "rob_timer.uops_x87",
+};
+
+UInt32 ReconfigurationManager::numRawMetricFeatures()
+{
+   return sizeof(RAW_METRIC_FEATURES) / sizeof(RAW_METRIC_FEATURES[0]);
 }
 
 void ReconfigurationManager::dumpIntervalStats(const std::string& output_file)
@@ -428,14 +503,148 @@ void ReconfigurationManager::dumpIntervalStats(const std::string& output_file)
       if (core_id == 0)
          m_last_snapshot.l3_bytes_prev = l3_bytes_prev;
 
+      // Derived summary fields, kept for the decision log and for readability.
       snprintf(buf, sizeof(buf),
          "{\"core_id\": %d, \"ipc\": %f, \"l1_miss_rate\": %f, \"l2_miss_rate\": %f, "
          "\"l3_miss_rate\": %f, \"branch_mpki\": %f, \"l2_prev\": %llu, \"btb_prev\": %llu, "
-         "\"prefetcher_prev\": \"%s\"}",
+         "\"prefetcher_prev\": \"%s\"",
          core_id, ipc, l1_miss_rate, l2_miss_rate, l3_miss_rate, branch_mpki,
          (unsigned long long)l2_bytes_prev, (unsigned long long)m_current_btb_entries[core_id],
          m_current_prefetch_type[core_id].c_str());
-      core_entries.push_back(buf);
+      std::string entry(buf);
+
+      // Raw per-interval counter deltas under their training names -- what the model
+      // was actually fitted on. Kept in this_raw so the derived columns below can reuse
+      // them without re-reading (and without depending on emission order).
+      std::map<std::string, UInt64> &prev_raw = m_prev_raw[core_id];
+      std::map<std::string, UInt64> this_raw;
+      #define dRaw(name) (this_raw.count(name) ? this_raw[name] : (UInt64)0)
+      for (UInt32 i = 0; i < numRawMetricFeatures(); i++)
+      {
+         std::string feat(RAW_METRIC_FEATURES[i]);
+         size_t dot = feat.find('.');
+         if (dot == std::string::npos)
+            continue;
+         std::string object = feat.substr(0, dot);
+         std::string metric = feat.substr(dot + 1);
+
+         // L3 is a single shared instance; its counters are registered against core 0
+         // only, so reading them per-core would report 0 (and warn) for cores 1..N.
+         core_id_t read_core = (object == "L3") ? 0 : core_id;
+         UInt64 now = readMetric(object.c_str(), read_core, metric.c_str());
+
+         UInt64 delta = now;
+         if (m_have_prev)
+         {
+            std::map<std::string, UInt64>::const_iterator it = prev_raw.find(feat);
+            // Guard against a counter going backwards (it should not, but an underflow
+            // here would produce an enormous bogus feature value rather than a zero).
+            if (it != prev_raw.end())
+               delta = (now >= it->second) ? (now - it->second) : 0;
+         }
+         prev_raw[feat] = now;
+         this_raw[feat] = delta;
+
+         snprintf(buf, sizeof(buf), ", \"%s_prev\": %llu", feat.c_str(),
+                  (unsigned long long)delta);
+         entry += buf;
+      }
+
+      // Derived features the training pipeline computed from those same counters
+      // (addCalculatedColumnsToMergedCsv.py: time_seconds, ips, ips_cubed). ppw_prev is
+      // deliberately absent -- it needs McPAT power for the interval just ended.
+      double time_seconds = (double)d_elapsed_fs / 1e15;
+      double ips = (time_seconds > 0.0) ? ((double)d_instructions / time_seconds) : 0.0;
+
+      // Two more training columns whose definition is unambiguous from the name and
+      // recoverable from counters we already read. The rest of that family
+      // (normalized_commit_*, l2_most_usage, l2_most_hit_rate, l2_avg_eviction_rate,
+      // l3_usage) is deliberately left zero-filled: no surviving script defines them,
+      // and a guessed definition would feed the model a confidently wrong value.
+      UInt64 br_correct = readMetric("branch_predictor", core_id, "num-correct");
+      UInt64 d_br_correct = br_correct;
+      {
+         std::map<std::string, UInt64>::const_iterator it =
+            prev_raw.find("branch_predictor.num-correct");
+         if (m_have_prev && it != prev_raw.end())
+            d_br_correct = (br_correct >= it->second) ? (br_correct - it->second) : 0;
+      }
+      UInt64 br_total = d_br_correct + d_branch_incorrect;
+      double branch_mispred_rate = br_total > 0 ? (double)d_branch_incorrect / (double)br_total : 0.0;
+
+      UInt64 l1d_stores = readMetric("L1-D", core_id, "stores");
+      UInt64 d_l1d_stores = l1d_stores;
+      {
+         std::map<std::string, UInt64>::const_iterator it = prev_raw.find("L1-D.stores");
+         if (m_have_prev && it != prev_raw.end())
+            d_l1d_stores = (l1d_stores >= it->second) ? (l1d_stores - it->second) : 0;
+      }
+      UInt64 l1_data_access = d_l1d_loads + d_l1d_stores;
+
+      // Remaining derived training columns. Definitions supplied by the author of the
+      // training pipeline (they are not recoverable from any surviving script), so they
+      // are transcribed literally here rather than inferred:
+      //   L2usage   = L2.loads + L2.stores                                    (3)
+      //   L3usage   = L3.loads + L3.stores                                    (5)
+      //   NormFP    = (uop_fp_addsub + uop_fp_muldiv + uops_x87) / instrs     (6)
+      //   NormMem   = (uop_load + uop_store) / instrs                         (7)
+      //   NormInt   = uop_generic / instrs                                    (8)
+      //   NormCtrl  = uop_branch / instrs                                     (9)
+      //   E_L2      = sum of L2.evict-{E,I,M,O,S}                            (10)
+      //   EvictRate = E_L2 / L2usage                                         (11)
+      //   HitRate   = 1 - (L2.load-misses + L2.store-misses) / L2usage       (12)
+      // dRaw() reuses the per-interval deltas already computed above, so these cost no
+      // extra readMetric() calls.
+      UInt64 l2_usage = dRaw("L2.loads") + dRaw("L2.stores");
+      UInt64 l3_usage = dRaw("L3.loads") + dRaw("L3.stores");
+      UInt64 e_l2 = dRaw("L2.evict-E") + dRaw("L2.evict-I") + dRaw("L2.evict-M")
+                  + dRaw("L2.evict-O") + dRaw("L2.evict-S");
+      double l2_evict_rate = l2_usage > 0 ? (double)e_l2 / (double)l2_usage : 0.0;
+      double l2_hit_rate = l2_usage > 0
+         ? 1.0 - ((double)(dRaw("L2.load-misses") + dRaw("L2.store-misses")) / (double)l2_usage)
+         : 0.0;
+      double instrs = (double)d_instructions;
+      double norm_fp   = instrs > 0 ? (double)(dRaw("rob_timer.uop_fp_addsub")
+                                    + dRaw("rob_timer.uop_fp_muldiv")
+                                    + dRaw("rob_timer.uops_x87")) / instrs : 0.0;
+      double norm_mem  = instrs > 0 ? (double)(dRaw("rob_timer.uop_load")
+                                    + dRaw("rob_timer.uop_store")) / instrs : 0.0;
+      double norm_int  = instrs > 0 ? (double)dRaw("rob_timer.uop_generic") / instrs : 0.0;
+      double norm_ctrl = instrs > 0 ? (double)dRaw("rob_timer.uop_branch") / instrs : 0.0;
+
+      snprintf(buf, sizeof(buf),
+               ", \"time_seconds_prev\": %g, \"ips_prev\": %g, \"ips_cubed_prev\": %g"
+               ", \"branch_mispred_rate_prev\": %g, \"l1_data_access_prev\": %llu"
+               ", \"l2_most_usage_prev\": %llu, \"l3_usage_prev\": %llu"
+               ", \"l2_avg_eviction_rate_prev\": %g, \"l2_most_hit_rate_prev\": %g"
+               ", \"normalized_commit_float_prev\": %g, \"normalized_commit_mem_prev\": %g"
+               ", \"normalized_commit_int_prev\": %g, \"normalized_commit_ctrl_prev\": %g",
+               time_seconds, ips, ips * ips * ips,
+               branch_mispred_rate, (unsigned long long)l1_data_access,
+               (unsigned long long)l2_usage, (unsigned long long)l3_usage,
+               l2_evict_rate, l2_hit_rate, norm_fp, norm_mem, norm_int, norm_ctrl);
+      entry += buf;
+      // McPAT figures for the interval just ended. Chip-wide values, replicated per
+      // core because that is the shape the per-core training rows had.
+      for (std::map<std::string, double>::const_iterator it = m_last_power_features.begin();
+           it != m_last_power_features.end(); ++it)
+      {
+         snprintf(buf, sizeof(buf), ", \"%s_prev\": %g", it->first.c_str(), it->second);
+         entry += buf;
+      }
+      {
+         // ppw = ips^3 / total power, matching addCalculatedColumnsToMergedCsv.py.
+         std::map<std::string, double>::const_iterator p =
+            m_last_power_features.find("total_runtime_dynamic");
+         double total_power = (p != m_last_power_features.end()) ? p->second : 0.0;
+         double ppw = (total_power > 0.0) ? (ips * ips * ips / total_power) : 0.0;
+         snprintf(buf, sizeof(buf), ", \"ppw_prev\": %g", ppw);
+         entry += buf;
+      }
+
+      entry += "}";
+      core_entries.push_back(entry);
+      #undef dRaw
 
       prev.instructions = instructions;
       prev.elapsed_time_fs = elapsed_time_fs;
