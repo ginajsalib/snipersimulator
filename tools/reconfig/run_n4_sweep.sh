@@ -26,12 +26,14 @@ ARMS="dynamic_rf max_resources max_resources_nopf"
 BENCHMARKS=""
 ICOUNT=1000000000
 DRYRUN=0
+INPUT=small
 TAG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --arms) ARMS="$2"; shift 2 ;;
     --benchmarks) BENCHMARKS="$2"; shift 2 ;;
     --icount) ICOUNT="$2"; shift 2 ;;
+    --input) INPUT="$2"; shift 2 ;;
     --tag) TAG="_$2"; shift 2 ;;
     --dry-run) DRYRUN=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
@@ -53,15 +55,16 @@ RESULTS_ROOT=$SNIPER_ROOT/results/n4_hetero$TAG
 export RESULTS_ROOT
 STATUS=$RESULTS_ROOT/sweep_status.csv
 mkdir -p "$(dirname "$STATUS")"
-[ -f "$STATUS" ] || echo "benchmark,arm,outcome,intervals,note" > "$STATUS"
+[ -f "$STATUS" ] || echo "benchmark,arm,input,outcome,intervals,note" > "$STATUS"
 
 already_ok () {  # $1=bench $2=arm -- already recorded as ok?
-  grep -q "^$1,$2,ok," "$STATUS" 2>/dev/null
+  grep -qE "^$1,$2,[^,]*,ok," "$STATUS" 2>/dev/null
 }
 
 echo "benchmarks: $BENCHMARKS"
 echo "arms      : $ARMS"
 echo "icount    : $ICOUNT"
+echo "input     : $INPUT"
 echo "results   : $RESULTS_ROOT"
 [ "$DRYRUN" = "1" ] && { echo "(dry run -- nothing executed)"; exit 0; }
 
@@ -76,21 +79,21 @@ for bench in $BENCHMARKS; do
     echo "== $bench / $arm   ($(date '+%F %T'))"
     echo "======================================================================"
 
-    if ICOUNT=$ICOUNT bash "$SNIPER_ROOT/tools/reconfig/run_n4_hetero.sh" "$bench" "$arm"; then
+    if ICOUNT=$ICOUNT INPUT=$INPUT bash "$SNIPER_ROOT/tools/reconfig/run_n4_hetero.sh" "$bench" "$arm"; then
       d=$RESULTS_ROOT/$bench/$arm
       n=$(ls "$d"/power-*.txt 2>/dev/null | wc -l)
       # A run that segfaults still leaves power files behind, so completion is judged by
       # sim.out existing (written only on a clean exit) -- see the no_change crash, which
       # produced 179 power files but no sim.out and no roi-end marker.
       if [ -f "$d/sim.out" ]; then
-        echo "$bench,$arm,ok,$n," >> "$STATUS"
+        echo "$bench,$arm,$INPUT,ok,$n," >> "$STATUS"
         echo "-> ok ($n intervals)"
       else
-        echo "$bench,$arm,crashed,$n,no sim.out (check debug_backtrace.out)" >> "$STATUS"
+        echo "$bench,$arm,$INPUT,crashed,$n,no sim.out (check debug_backtrace.out)" >> "$STATUS"
         echo "-> CRASHED after $n intervals, continuing"
       fi
     else
-      echo "$bench,$arm,failed,0,run-sniper returned nonzero" >> "$STATUS"
+      echo "$bench,$arm,$INPUT,failed,0,run-sniper returned nonzero" >> "$STATUS"
       echo "-> FAILED to run, skipping"
     fi
   done

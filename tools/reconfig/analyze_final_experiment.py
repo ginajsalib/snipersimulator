@@ -581,6 +581,45 @@ def compare_arms(benchmark, arms, oracle_ppw=None):
     }
 
 
+def _input_class_map(resultsroot):
+    """{(benchmark, arm): input_class} from the sweep's own status CSV.
+
+    NOT from sim.info: that records the *sniper* command line, and run-sniper consumes
+    --benchmarks itself (handing sniper a trace), so the SPLASH input class never appears
+    there. run_n4_sweep.sh writes it per (benchmark, arm) instead."""
+    out = {}
+    path = os.path.join(resultsroot, 'sweep_status.csv')
+    if not os.path.exists(path):
+        return out
+    try:
+        with open(path) as f:
+            for row in csv.DictReader(f):
+                if row.get('input'):
+                    out[(row.get('benchmark'), row.get('arm'))] = row['input']
+    except Exception:
+        pass
+    return out
+
+
+def _run_transitions(resultsdir):
+    """Number of intervals whose ACTIVE config differs from the previous interval's."""
+    path = os.path.join(resultsdir, 'sniper_reconfig_decisions.csv')
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+        rows = list(reader)
+    prev_cols = _prev_cols(fieldnames)
+    n, last = 0, None
+    for r in rows:
+        cur = tuple(r.get(c) for c in prev_cols)
+        if last is not None and cur != last:
+            n += 1
+        last = cur
+    return n
+
+
 def sweep_summary(resultsroot, arms=None):
     """Tabulate every benchmark under resultsroot/<benchmark>/<arm>/, reporting
     dynamic_rf's PPW gain over each baseline present. Benchmarks whose arms are missing
@@ -609,13 +648,19 @@ def sweep_summary(resultsroot, arms=None):
     print('=' * 78)
     print('N=4 SWEEP SUMMARY -- dynamic_rf PPW gain over each baseline')
     print('=' * 78)
-    print('  %-14s %12s %12s %12s %12s' % ('benchmark', 'dynamic_rf', 'vs max_res', 'vs max_nopf', 'vs best_stat'))
+    inputs = _input_class_map(resultsroot)
+    print('  %-12s %-7s %6s %6s %11s %11s %11s %11s' % (
+        'benchmark', 'input', 'ivals', 'moves', 'dynamic_rf', 'vs max_res', 'vs max_nopf', 'vs best_stat'))
     def pct(d, b):
         return '%+.1f%%' % ((d - b) / b * 100.0) if b else 'n/a'
     for bench, ppw in rows:
         d = ppw['dynamic_rf']
-        print('  %-14s %12s %12s %12s %12s' % (
-            bench, _fmt(d),
+        ddir = os.path.join(resultsroot, bench, 'dynamic_rf')
+        inp = inputs.get((bench, 'dynamic_rf'), '?')
+        moves = _run_transitions(ddir)
+        n_iv = len(glob.glob(os.path.join(ddir, 'power-*.txt')))
+        print('  %-12s %-7s %6d %6s %11s %11s %11s %11s' % (
+            bench, inp, n_iv, ('-' if moves is None else moves), _fmt(d),
             pct(d, ppw['max_resources']) if 'max_resources' in ppw else 'n/a',
             pct(d, ppw['max_resources_nopf']) if 'max_resources_nopf' in ppw else 'n/a',
             pct(d, ppw['best_static']) if 'best_static' in ppw else 'n/a'))

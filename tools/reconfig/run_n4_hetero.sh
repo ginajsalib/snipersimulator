@@ -23,6 +23,11 @@ cd "$CFG_DIR"
 
 # ICOUNT may be overridden by the caller (run_n4_sweep.sh) to shorten runs.
 ICOUNT="${ICOUNT:-1000000000}"
+# INPUT selects the SPLASH input class (test|tiny|small|large). The kernels are very
+# short at "small": fft(-m18) gave 74 intervals and radix(-n262144) only 10, vs
+# cholesky's 514, so their PPW rested on a handful of McPAT samples. "large" is
+# fft -m22 (~20x the work) and radix -n1048576 (4x).
+INPUT="${INPUT:-small}"
 BENCH="${1:?usage: run_n4_hetero.sh <benchmark> <arm>}"
 ARM="${2:?usage: run_n4_hetero.sh <benchmark> <arm>}"
 
@@ -40,26 +45,47 @@ L1D_PERF=32;        L1D_EFF=16
 
 # Per-arm reconfigurable dimensions (L2 KB / BTB entries / prefetcher), per core type.
 case "$ARM" in
-  no_change|dynamic_rf)
-    # Baseline sizes; dynamic_rf starts here too and lets the model move it.
+  dynamic_rf)
+    # Starts IDENTICAL to max_resources -- maximal caches/BTB *and* the aggressive
+    # `simple` prefetcher. Same start, same ceiling, so the comparison isolates what the
+    # model actually decided rather than where it began.
+    #
+    # The prefetcher is ON deliberately. An earlier version started it off, which quietly
+    # assumed the answer: we only know the prefetcher is what collapses this config
+    # because we profiled it, and a deployed system has no such oracle. Handing the model
+    # a config that is already hindsight-corrected removes the very decision it exists to
+    # make. Whether it discovers that the prefetcher should be disabled -- or finds some
+    # other dimension that matters more -- is the experiment.
+    L2_PERF=1024; L2_EFF=1024
+    BTB_PERF=4096; BTB_EFF=4096
+    PF_PERF=simple; PF_EFF=simple
+    L3_KB=16384
+    ;;
+  dynamic_rf_smallstart|no_change)
+    # The original small starting config, retained so the earlier runs remain
+    # reproducible and so "does the starting point matter?" can be answered directly.
     L2_PERF=256;  L2_EFF=128
     BTB_PERF=512; BTB_EFF=256
     PF_PERF=none; PF_EFF=none
+    L3_KB=8192          # gainestown default, matching the original small start
     ;;
   max_resources)
     L2_PERF=1024; L2_EFF=1024
     BTB_PERF=4096; BTB_EFF=4096
     PF_PERF=simple; PF_EFF=simple
+    L3_KB=16384
     ;;
   max_resources_nopf)
-    # Same maximal caches/BTB as max_resources but prefetching OFF. Disambiguates the
-    # collapse seen at both N=2 and N=4 (max_resources runs ~4.3-4.8x slower than every
-    # other arm): is it the aggressive prefetcher saturating shared bandwidth, or simply
-    # the larger caches? Without this arm, "dynamic_rf beats max_resources by 21x" cannot
-    # be attributed, and reads as "beats a badly-configured prefetcher".
+    # HINDSIGHT-TUNED baseline -- same category as best_static, NOT a neutral one. It
+    # encodes knowledge (that this prefetcher setting collapses these workloads) that was
+    # only obtained by profiling, and that a deployed system would not have in advance.
+    # Useful as an upper bound on what expert hand-tuning achieves, and to attribute the
+    # max_resources collapse to a dimension; it is NOT the baseline the model should be
+    # judged against. Label it as hindsight-tuned wherever it is reported.
     L2_PERF=1024; L2_EFF=1024
     BTB_PERF=4096; BTB_EFF=4096
     PF_PERF=none; PF_EFF=none
+    L3_KB=16384
     ;;
   best_static)
     # NOTE: there is no N=4 heterogeneous sweep, so this is the N=2 hindsight-optimal
@@ -68,6 +94,7 @@ case "$ARM" in
     L2_PERF=1024; L2_EFF=512
     BTB_PERF=4096; BTB_EFF=2048
     PF_PERF=none; PF_EFF=none
+    L3_KB=16384
     ;;
   *) echo "unknown arm: $ARM" >&2; exit 1 ;;
 esac
@@ -100,7 +127,8 @@ write_core_cfg "$CFG_DIR/hc3.cfg" $FREQ_EFF  $DISPATCH_EFF  $WINDOW_EFF  $L1D_EF
 
 # dynamic_rf drives the real model through the host bridge; every other arm holds its
 # starting config via noop_predict.py, which runs directly in-container.
-if [ "$ARM" = "dynamic_rf" ]; then
+case "$ARM" in dynamic_rf|dynamic_rf_smallstart) IS_DYNAMIC=1 ;; *) IS_DYNAMIC=0 ;; esac
+if [ "$IS_DYNAMIC" = "1" ]; then
   HOOK=$SNIPER_ROOT/.reconfig_bridge_shim.sh
 else
   HOOK=$SNIPER_ROOT/tools/reconfig/noop_predict.py
@@ -115,7 +143,7 @@ OUTDIR=$RESULTS_ROOT/$BENCH/$ARM
 rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"
 
-/root/benchmarks/run-sniper --benchmarks "splash2-${BENCH}-small-4" -n 4 -c gainestown \
+/root/benchmarks/run-sniper --benchmarks "splash2-${BENCH}-${INPUT}-4" -n 4 -c gainestown \
   -c hc0,hc1,hc2,hc3 \
   -s stop-by-icount:$ICOUNT \
   -d "$OUTDIR" \
@@ -126,6 +154,7 @@ mkdir -p "$OUTDIR"
   -g perf_model/l2_cache/prefetcher/simple/stop_at_page_boundary=false \
   -g perf_model/l2_cache/prefetcher/simple/flows_per_core=false \
   -g general/max_instructions=$ICOUNT \
+  -g perf_model/l3_cache/cache_size=$L3_KB \
   -greconfig/enabled=true \
   -greconfig/python_hook_script=$HOOK \
   -greconfig/mcpat_script_path=$SNIPER_ROOT/tools/mcpat.py \
@@ -133,7 +162,7 @@ mkdir -p "$OUTDIR"
   -greconfig/live_config_path="$OUTDIR/sniper_reconfig_live.cfg"
 
 echo
-echo "=== $BENCH / $ARM done -> $OUTDIR ==="
+echo "=== $BENCH / $ARM (input=$INPUT) done -> $OUTDIR ==="
 echo "per-core config actually applied (check the [] arrays are 4 wide and asymmetric):"
 grep -E "^(frequency|dispatch_width|window_size|cache_size|num_entries|prefetcher)" "$OUTDIR/sim.cfg" | head -20
 echo "failed predictions (must be 0 for dynamic_rf):"

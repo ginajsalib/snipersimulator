@@ -82,3 +82,10 @@ frontend/pin-frontend/sift/*.h
 frontend/pin-frontend/sift/*.cc
 sift/recorder/sift/*.h
 sift/recorder/sift/*.cc
+
+# Large local build/deploy artifacts -- never commit. The docker image tarball in
+# particular is ~25 GB and would be effectively unrecoverable from history once pushed.
+libtorch/
+xed/
+snipersim-reconfig-docker-image.tar
+*.tar
