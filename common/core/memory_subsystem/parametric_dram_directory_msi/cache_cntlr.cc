@@ -2348,14 +2348,21 @@ CacheCntlr::reconfigure(UInt64 new_capacity_bytes)
 		// past the physically allocated associativity is normal and expected -- the
 		// model asks in bytes and simply wants "as large as possible" -- and has
 		// nothing to do with live data, which the old text claimed in both cases.
+		// Braces are required, not stylistic: in a non-NDEBUG build LOG_PRINT expands to
+		// a braced block FOLLOWED BY a semicolon, so an unbraced if/else around it becomes
+		// "if (c) { ... };; else" and the else is orphaned.
 		if (target_ways > effective_ways && effective_ways == cache->getAssociativity())
+		{
 			LOG_PRINT("reconfigure(core %d): requested %u ways, capped at the cache's %u "
 				"physical ways (grow-to-max, not a clamp)",
 				m_core_id, target_ways, effective_ways);
+		}
 		else
+		{
 			LOG_PRINT_WARNING("reconfigure(core %d): requested %u active ways, raised to %u "
 				"(shrink refused -- those ways still hold live data)",
 				m_core_id, target_ways, effective_ways);
+		}
 	}
 
 	if (effective_ways != old_ways)
