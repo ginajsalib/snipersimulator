@@ -219,20 +219,32 @@ tools/reconfig/analyze_final_experiment.py         # or: adapt ppw_savings_summa
   set.
 - **Equal work per arm.** `-s stop-by-icount:<N>` or SPLASH ROI markers so
   `total_instructions` is ~constant per benchmark across arms.
-- **Core timing model mismatch with training data.** The reconfiguration hook
-  only exists inside `IntervalPerformanceModel::simulate()`
-  (`interval_performance_model.cc`) -- it is unreachable under
-  `perf_model/core/type = rob` (`RobPerformanceModel`/`RobSmtPerformanceModel`,
-  `performance_model.cc:36-42`). `runSniperWithCfg.sh`, the script that
-  generated the actual training/sweep data (`merged_full_<bench>.csv`,
-  `train_with_top3_<bench>.csv`), uses `-c rob`. So every arm here necessarily
-  runs under `interval` (via `-c gainestown` alone, which pulls in
-  `nehalem.cfg`'s `type = interval` -- do **not** add `-c rob`), a different
-  core model than the one that produced `best_static`'s chosen values and
-  everything the RF/surrogate models learned from. This is a real, unavoidable
-  train/test mismatch on top of the ones already listed below -- disclose it
-  explicitly rather than treating `best_static` as if it were being run under
-  its original collection conditions.
+- **Core timing model mismatch with training data -- RESOLVED, see below.** The
+  reconfiguration hook originally existed only inside
+  `IntervalPerformanceModel::simulate()` (`interval_performance_model.cc`), making it
+  unreachable under `perf_model/core/type = rob`
+  (`RobPerformanceModel`/`RobSmtPerformanceModel`, `performance_model.cc:36-42`).
+  `runSniperWithCfg.sh`, the script that generated the actual training/sweep data
+  (`merged_full_<bench>.csv`, `train_with_top3_<bench>.csv`), uses `-c rob`. Every arm
+  therefore had to run under `interval`, a different core model than the one that
+  produced `best_static`'s values and everything the RF/surrogate models learned from.
+
+  This was believed unavoidable and documented as an accepted limitation. It was not.
+  `RobPerformanceModel::simulate()` has the same signature and shape as the interval
+  one, and `triggerReconfigHook()` is public on the shared `PerformanceModel` base, so
+  the tick was added there too (~25 lines, mirroring the interval version including the
+  core-0-only guard). **Reconfiguration now runs under `-c rob`**, which:
+    * matches the core model the training data was collected under, removing the
+      train/serve timing mismatch entirely;
+    * restores the seven `rob_timer.uop_*` input features the model was trained on,
+      which are structurally absent under `interval` (confirmed: a live interval-model
+      run registers 0 `rob_timer` metrics and 120 `interval_timer` ones).
+
+  Note this does NOT by itself fix the wider feature-alignment problem: the live
+  `dumpIntervalStats()` still emits derived rates rather than the raw counters the
+  scaler was fitted on, so ~94.7% of the model's 567 input features are still
+  zero-filled by `align_to_scaler()`. Running under rob is necessary but not
+  sufficient -- see the feature-alignment work.
 - **Warm-up.** Drop interval 0 (cold caches; model sees no deltas) from every
   arm's aggregate.
 - **Determinism.** Single-threaded interval model is deterministic; multithreaded

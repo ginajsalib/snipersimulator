@@ -14,6 +14,15 @@ protected:
    virtual void notifyElapsedTimeUpdate();
 private:
    RobTimer rob_timer;
+
+   // Runtime reconfiguration tick, mirroring IntervalPerformanceModel's. The hook was
+   // originally only in the interval model, which forced every reconfiguration run onto
+   // perf_model/core/type = interval while the training sweep (runSniperWithCfg.sh) was
+   // collected under type = rob -- a train/serve mismatch that also made the model's
+   // rob_timer.* input features structurally unobtainable at runtime.
+   bool m_reconfig_enabled;
+   UInt64 m_reconfig_interval;
+   UInt64 m_interval_insn_count;
 };
 
 #endif
