@@ -16,6 +16,8 @@
 #include "log.h"
 
 #include <cstdlib>
+#include <set>
+#include <string>
 #include <cstdio>
 #include <cctype>
 #include <fstream>
@@ -326,7 +328,20 @@ UInt64 ReconfigurationManager::readMetric(const char* category, core_id_t core_i
 {
    StatsMetricBase *m = Sim()->getStatsManager()->getMetricObject(category, core_id, metric);
    if (!m)
+   {
+      // Silently returning 0 here hid a real bug for the whole project: the cache
+      // counters were requested as "tloads"/"tload-misses", which are not registered
+      // names ("loads"/"load-misses" are), so every L1/L2/L3 miss rate fed to the model
+      // was identically 0.0 in every interval of every run. LOG_PRINT_WARNING is
+      // compiled out under NDEBUG, so use a raw fprintf -- once per (category, metric)
+      // -- to make a bad name impossible to miss.
+      static std::set<std::string> warned;
+      std::string key = std::string(category) + "/" + metric;
+      if (warned.insert(key).second)
+         fprintf(stderr, "[reconfig] WARNING: stat '%s' is not registered -- "
+                         "reading it as 0 (check the metric name)\n", key.c_str());
       return 0;
+   }
    return m->recordMetric();
 }
 
@@ -350,12 +365,12 @@ void ReconfigurationManager::dumpIntervalStats(const std::string& output_file)
       UInt64 instructions      = readMetric("performance_model", core_id, "instruction_count");
       UInt64 elapsed_time_fs   = readMetric("performance_model", core_id, "elapsed_time");
       UInt64 branch_incorrect  = readMetric("branch_predictor", core_id, "num-incorrect");
-      UInt64 l1d_loads         = readMetric("L1-D", core_id, "tloads");
-      UInt64 l1d_load_misses   = readMetric("L1-D", core_id, "tload-misses");
-      UInt64 l2_loads          = readMetric("L2", core_id, "tloads");
-      UInt64 l2_load_misses    = readMetric("L2", core_id, "tload-misses");
-      UInt64 l3_loads          = readMetric("L3", core_id, "tloads");
-      UInt64 l3_load_misses    = readMetric("L3", core_id, "tload-misses");
+      UInt64 l1d_loads         = readMetric("L1-D", core_id, "loads");
+      UInt64 l1d_load_misses   = readMetric("L1-D", core_id, "load-misses");
+      UInt64 l2_loads          = readMetric("L2", core_id, "loads");
+      UInt64 l2_load_misses    = readMetric("L2", core_id, "load-misses");
+      UInt64 l3_loads          = readMetric("L3", core_id, "loads");
+      UInt64 l3_load_misses    = readMetric("L3", core_id, "load-misses");
 
       CoreCounters &prev = m_prev[core_id];
       UInt64 d_instructions     = m_have_prev ? (instructions - prev.instructions) : instructions;
