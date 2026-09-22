@@ -71,7 +71,11 @@ for bench in $BENCHMARKS; do
            | grep -o "[0-9]* lines" | grep -o "[0-9]*" | paste -sd+ | bc 2>/dev/null)
       fd=$(grep -o "([0-9]* dirty)" "$OUTDIR/run.log" 2>/dev/null \
            | grep -o "[0-9]*" | paste -sd+ | bc 2>/dev/null)
-      tr=$(python3 - "$OUTDIR/sniper_reconfig_decisions.csv" <<'PY' 2>/dev/null
+      # NOT "python3": /usr/bin/python3 in this container is a symlink to
+      # .reconfig_bridge_shim.sh, so invoking it here does a bridge handshake instead of
+      # running the script -- which is why this column reported "?" on the first run.
+      PY3=/opt/rh/rh-python36/root/usr/bin/python3.6
+      tr=$($PY3 - "$OUTDIR/sniper_reconfig_decisions.csv" <<'PY' 2>/dev/null
 import csv,sys
 rows=list(csv.DictReader(open(sys.argv[1])))
 prev=[c for c in (rows[0] if rows else {}) if '_prev' in c]
