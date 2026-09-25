@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run the sweep configurations that were never simulated, inside the CentOS6 container.
 #
-#   run_missing_sweep.sh --list <file.tsv> [--jobs N] [--limit N] [--benchmarks "a b"] [--go]
+#   run_missing_sweep.sh --list <file.tsv> [--limit N] [--benchmarks "a b"] [--go]
 #
 # Consumes the TSV written by gen_missing_configs.py. DRY RUN BY DEFAULT -- pass --go to
 # actually execute, because the full list is 3072 runs (~64 days serial).
@@ -12,11 +12,9 @@
 # same 1e9 instruction budget, same prefetcher tuning, and the same output directory
 # naming (the extraction pipeline parses the config back out of that name).
 #
-# PARALLEL-SAFE, unlike the reconfiguration sweeps: reconfig/enabled is false here, so
-# nothing touches the shared /tmp/sniper_interval_stats.json handshake files. The one
-# thing that did need fixing is the per-core cfg files -- runSniperWithCfg.sh wrote a
-# single core0.cfg/core1.cfg into CFG_DIR, which parallel jobs would clobber, so each
-# job writes its own uniquely-named pair.
+# Runs strictly SEQUENTIALLY, one simulation at a time. The per-core cfg files still get
+# run-specific names rather than runSniperWithCfg.sh's fixed core0.cfg/core1.cfg, so this
+# cannot collide with a manual runSniperWithCfg.sh invocation happening alongside it.
 
 set -u
 export SNIPER_ROOT=${SNIPER_ROOT:-/export/sniperCodeNewBranch-centos6}
@@ -27,14 +25,12 @@ DISPATCH_WIDTH=4
 ICOUNT=${ICOUNT:-1000000000}
 
 LIST=""
-JOBS=1
 LIMIT=0
 ONLY=""
 GO=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --list)       LIST="$2"; shift 2 ;;
-    --jobs)       JOBS="$2"; shift 2 ;;
     --limit)      LIMIT="$2"; shift 2 ;;
     --benchmarks) ONLY="$2"; shift 2 ;;
     --go)         GO=1; shift ;;
@@ -46,6 +42,7 @@ done
 
 cd "$CFG_DIR"
 STATUS=$OUT_ROOT/missing_sweep_status.csv
+mkdir -p "$OUT_ROOT"
 [ -f "$STATUS" ] || echo "benchmark,l2c0,l2c1,l3,pf0,pf1,btb0,btb1,outcome,dir" > "$STATUS"
 
 run_one () {   # $1..$8 = bench l2c0 l2c1 l3 pf0 pf1 btb0 btb1
@@ -59,8 +56,9 @@ run_one () {   # $1..$8 = bench l2c0 l2c1 l3 pf0 pf1 btb0 btb1
     return 0
   fi
 
-  # Unique per-core cfg names so parallel jobs cannot clobber each other.
-  local tag="$$_${bench}_${l20}_${l21}_${l3}_${pf0}_${pf1}_${bp0}_${bp1}"
+  # Distinct from runSniperWithCfg.sh's fixed core0.cfg/core1.cfg so the two cannot
+  # interfere if both are ever used against the same CFG_DIR.
+  local tag="${bench}_${l20}_${l21}_${l3}_${pf0}_${pf1}_${bp0}_${bp1}"
   local c0="$CFG_DIR/mc0_${tag}.cfg" c1="$CFG_DIR/mc1_${tag}.cfg"
   cat > "$c0" <<EOF
 [perf_model/core/interval_timer]
@@ -131,31 +129,27 @@ done > "$WORK"
 
 TOTAL=$(wc -l < "$WORK")
 echo "runs to do : $TOTAL   (already-complete ones skipped)"
-echo "parallelism: $JOBS"
 echo "icount     : $ICOUNT"
 echo "output     : $OUT_ROOT/config_l2_*"
 awk -F'\t' '{print $1}' "$WORK" | sort | uniq -c | awk '{printf "   %-12s %d\n", $2, $1}'
-echo "est. wall  : ~%.1f days" | sed "s|%.1f|$(awk -v t="$TOTAL" -v j="$JOBS" 'BEGIN{printf "%.1f", t*30/1440.0/j}')|"
+echo "est. wall  : ~$(awk -v t="$TOTAL" 'BEGIN{printf "%.1f", t*30/1440.0}') days (sequential, at ~30 min/run)"
 
 if [ "$GO" != "1" ]; then
   echo
   echo "DRY RUN -- nothing executed. Re-run with --go to start."
-  echo "Consider --benchmarks / --limit / --jobs first: the full list is ~64 days serial."
+  echo "Consider --benchmarks / --limit first: the full list is ~64 days."
   rm -f "$WORK"
   exit 0
 fi
 
-# ---- execute -------------------------------------------------------------------
-running=0
+# ---- execute (sequential, one simulation at a time) -----------------------------
+done_n=0
 while IFS=$'\t' read -r b a c d e f g h; do
-  run_one "$b" "$a" "$c" "$d" "$e" "$f" "$g" "$h" &
-  running=$((running+1))
-  if [ "$running" -ge "$JOBS" ]; then
-    wait -n 2>/dev/null || wait
-    running=$((running-1))
-  fi
+  done_n=$((done_n+1))
+  echo
+  echo "[$done_n/$TOTAL] $(date '+%F %T')"
+  run_one "$b" "$a" "$c" "$d" "$e" "$f" "$g" "$h"
 done < "$WORK"
-wait
 rm -f "$WORK"
 
 echo
