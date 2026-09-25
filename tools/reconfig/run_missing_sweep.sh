@@ -38,7 +38,21 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$LIST" ] || { echo "need --list <file.tsv> (see gen_missing_configs.py)" >&2; exit 1; }
-[ -f "$LIST" ] || { echo "no such list: $LIST" >&2; exit 1; }
+# Resolve a relative --list against $SNIPER_ROOT as well as the CWD: the lists are
+# generated into $SNIPER_ROOT/results/, and this script cd's to $CFG_DIR before running
+# anything, so a bare "./results/..." would otherwise resolve somewhere unhelpful.
+if [ ! -f "$LIST" ] && [ -f "$SNIPER_ROOT/$LIST" ]; then
+  LIST="$SNIPER_ROOT/$LIST"
+elif [ ! -f "$LIST" ] && [ -f "$SNIPER_ROOT/results/$(basename "$LIST")" ]; then
+  LIST="$SNIPER_ROOT/results/$(basename "$LIST")"
+fi
+if [ ! -f "$LIST" ]; then
+  echo "no such list: $LIST" >&2
+  echo "available under $SNIPER_ROOT/results/:" >&2
+  ls "$SNIPER_ROOT/results/"*.tsv 2>/dev/null >&2 || echo "  (none -- run gen_missing_configs.py on the host first)" >&2
+  exit 1
+fi
+echo "list       : $LIST"
 
 cd "$CFG_DIR"
 STATUS=$OUT_ROOT/missing_sweep_status.csv
