@@ -4,7 +4,17 @@
 #
 #   extract_and_append.sh --benchmark <name> [--dirs-list <file>] [--dry-run]
 #
-# Runs on the HOST (the big CSVs and the pipeline scripts live there).
+# TWO PHASES, because the work is split across the container boundary:
+#
+#   phase 1 (CONTAINER) -- processIntervals.py shells out to
+#       /root/sniper/tools/dumpstats.py and walks /export, both container-only paths,
+#       so the per-interval performance counters must be collected there. Output lands
+#       in the shared mount.
+#   phase 2 (HOST)      -- McPAT power parsing and the pandas pipeline stages, where the
+#       large CSVs live.
+#
+# Run this script in either place: it detects which side it is on and does that phase,
+# then tells you the command for the other.
 #
 # The stock pipeline (run_pipeline.py) regenerates merged_full_<bench>.csv from scratch
 # and would overwrite years of collected data, so this drives the same Stage-1 scripts
@@ -23,6 +33,9 @@ MERGED_DIR=$PYS/merged_full
 BENCH=""
 DIRS_LIST=""
 DRY=0
+# $SNIPER_ROOT/results inside the container == $MOUNT/sniperCodeNewBranch-centos6/results
+# on the host; the perf CSV is handed between the phases through it.
+CONTAINER_SNIPER_ROOT=/export/sniperCodeNewBranch-centos6
 while [ $# -gt 0 ]; do
   case "$1" in
     --benchmark) BENCH="$2"; shift 2 ;;
@@ -33,8 +46,44 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$BENCH" ] || { echo "need --benchmark <name>" >&2; exit 1; }
 
+PERF_SHARED_REL=results/extract_${BENCH}_perf.csv
+
+# ---------------- phase 1: container ----------------
+if [ -d /export ] && [ -f /root/sniper/tools/dumpstats.py ]; then
+  OUT=$CONTAINER_SNIPER_ROOT/$PERF_SHARED_REL
+  mkdir -p "$(dirname "$OUT")"
+  ONLY=$(mktemp)
+  if [ -n "$DIRS_LIST" ]; then
+    cp "$DIRS_LIST" "$ONLY"
+  else
+    ls -d /export/config_l2_*_"${BENCH}"-intervals 2>/dev/null | xargs -r -n1 basename > "$ONLY" || true
+  fi
+  echo "phase 1 (container): collecting per-interval counters for $BENCH"
+  echo "  directories: $(wc -l < "$ONLY")"
+  echo "  output     : $OUT"
+  # processIntervals.py lives in snipersim_framework, which is NOT under the bind mount,
+  # so a copy is kept alongside this script. And NOT "python3": that is the
+  # .reconfig_bridge_shim.sh symlink in this container -- use the real interpreter.
+  PY3=/opt/rh/rh-python36/root/usr/bin/python3.6
+  [ -x "$PY3" ] || PY3=/opt/python3.11/bin/python3.11
+  "$PY3" "$CONTAINER_SNIPER_ROOT/tools/reconfig/processIntervals.py" "$BENCH" "$OUT" "$ONLY"
+  rm -f "$ONLY"
+  echo
+  echo "phase 1 done. Now on the HOST:"
+  echo "  bash tools/reconfig/extract_and_append.sh --benchmark $BENCH --dry-run"
+  exit 0
+fi
+
+# ---------------- phase 2: host ----------------
 TARGET=$MERGED_DIR/merged_full_${BENCH}.csv
 [ -f "$TARGET" ] || { echo "no existing $TARGET to append to" >&2; exit 1; }
+PERF_FROM_CONTAINER=$MOUNT/sniperCodeNewBranch-centos6/$PERF_SHARED_REL
+if [ ! -f "$PERF_FROM_CONTAINER" ]; then
+  echo "missing $PERF_FROM_CONTAINER" >&2
+  echo "Run phase 1 inside the container first:" >&2
+  echo "  bash \$SNIPER_ROOT/tools/reconfig/extract_and_append.sh --benchmark $BENCH" >&2
+  exit 1
+fi
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -42,20 +91,13 @@ echo "benchmark : $BENCH"
 echo "target    : $TARGET  ($(wc -l < "$TARGET") lines)"
 echo "workdir   : $WORK"
 
-# If no explicit list, extract every config dir for this benchmark; the dedup step below
-# drops whatever is already present, so a full rescan is correct, just slower.
-if [ -n "$DIRS_LIST" ]; then
-  cp "$DIRS_LIST" "$WORK/only.txt"
-  echo "restricted: $(wc -l < "$WORK/only.txt") directories"
-else
-  ls -d "$MOUNT"/config_l2_*_"${BENCH}"-intervals 2>/dev/null | xargs -r -n1 basename > "$WORK/only.txt" || true
-  echo "scanning  : $(wc -l < "$WORK/only.txt") directories for $BENCH"
-fi
+ls -d "$MOUNT"/config_l2_*_"${BENCH}"-intervals 2>/dev/null | xargs -r -n1 basename > "$WORK/only.txt" || true
+echo "dirs      : $(wc -l < "$WORK/only.txt") on disk for $BENCH"
 
 echo
-echo "--- stage 0a: per-interval performance counters ---"
-( cd "$FRAMEWORK" && python3 processIntervals.py "$BENCH" "$WORK/perf.csv" "$WORK/only.txt" ) \
-  | tail -8
+echo "--- stage 0a: per-interval counters (from container phase) ---"
+cp "$PERF_FROM_CONTAINER" "$WORK/perf.csv"
+echo "  $(wc -l < "$WORK/perf.csv") rows from $PERF_FROM_CONTAINER"
 
 echo
 echo "--- stage 0b: per-interval McPAT power ---"
