@@ -56,10 +56,13 @@ echo "compressor: $(echo "$COMP" | awk '{print $1}')  (.$EXT)"
 
 # --before protects runs that are still being produced, or that completed after the
 # last extraction and are therefore not yet in merged_full.
-BEFORE_ARG=""
-[ -n "$BEFORE" ] && BEFORE_ARG="-not -newermt $BEFORE"
+# An array, not a string: the timestamp contains a space, so an unquoted
+# "-not -newermt $BEFORE" word-splits and find reports
+# "paths must precede expression: 13:00".
+BEFORE_ARGS=()
+[ -n "$BEFORE" ] && BEFORE_ARGS=(-not -newermt "$BEFORE")
 mapfile -t DIRS < <(find "$MOUNT" -maxdepth 1 -type d -name "config_l2_*_${BENCH}-intervals" \
-                      $BEFORE_ARG -exec test -f {}/sim.out \; -print | sort)
+                      ${BEFORE_ARGS[@]+"${BEFORE_ARGS[@]}"} -exec test -f {}/sim.out \; -print | sort)
 [ -n "$BEFORE" ] && echo "filter    : only directories older than $BEFORE"
 echo "benchmark : $BENCH"
 echo "complete  : ${#DIRS[@]} directories"
