@@ -25,13 +25,22 @@ cd /root/benchmarks
 BENCHMARKS="cholesky"
 INPUT=small
 ICOUNT=1000000000
+# Which arms to run. After a rebuild that changes only the flush path there is no reason to
+# redo clamp -- "--policies flush --force" re-measures just the arm that moved.
+POLICIES="clamp flush"
+FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --benchmarks) BENCHMARKS="$2"; shift 2 ;;
     --input)      INPUT="$2";      shift 2 ;;
     --icount)     ICOUNT="$2";     shift 2 ;;
+    --policies)   POLICIES="$2";   shift 2 ;;
+    --force)      FORCE=1;         shift ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
+done
+for p in $POLICIES; do
+  case "$p" in clamp|flush) ;; *) echo "unknown policy: $p (want clamp and/or flush)" >&2; exit 1 ;; esac
 done
 
 ROOT=$SNIPER_ROOT/results/shrink_policy_ab
@@ -61,11 +70,17 @@ STATUS=$ROOT/status.csv
 [ -f "$STATUS" ] || echo "benchmark,policy,input,outcome,intervals,transitions,flush_lines,flush_dirty" > "$STATUS"
 
 for bench in $BENCHMARKS; do
-  for policy in clamp flush; do
+  for policy in $POLICIES; do
     OUTDIR=$ROOT/$bench/$policy
-    if [ -f "$OUTDIR/sim.out" ]; then
-      echo "== SKIP $bench/$policy (already complete) =="
+    if [ -f "$OUTDIR/sim.out" ] && [ "$FORCE" = "0" ]; then
+      echo "== SKIP $bench/$policy (already complete -- pass --force to redo) =="
       continue
+    fi
+    if [ -f "$OUTDIR/sim.out" ]; then
+      # Drop the stale row so the summary does not show the old and new runs side by side
+      # as if they were two measurements. The run itself is cleaned by run_n4_hetero.sh.
+      grep -v "^$bench,$policy," "$STATUS" > "$STATUS.tmp" && mv "$STATUS.tmp" "$STATUS"
+      echo "== REDO $bench/$policy (discarding the previous run) =="
     fi
     echo
     echo "======================================================================"
