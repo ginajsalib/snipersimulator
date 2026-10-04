@@ -101,6 +101,8 @@ public:
 
    // Hook callback (static) that dispatches to the singleton instance.
    static SInt64 reconfigHookCallback(UInt64 arg, UInt64 core_id);
+   // Fired at HOOK_ROI_END to close the McPAT window chain -- see finalPowerSample().
+   static SInt64 roiEndCallback(UInt64 arg, UInt64 unused);
 
    // Run one full reconfiguration cycle. Returns 0 on success, -1 on any failure (in which
    // case the current configuration is left untouched — no partial reconfiguration).
@@ -136,6 +138,18 @@ private:
    // --partial=<prev marker>:<this marker> -c m_live_config_path, so every McPAT power
    // sample corresponds to exactly one reconfiguration interval.
    void triggerPowerSample();
+   // One last McPAT sample covering everything after the final reconfiguration tick.
+   // The tick only fires on core 0 (rob/interval_performance_model.cc), so when core 0
+   // finishes or blocks at a barrier the chain of power windows stops there while the
+   // other cores keep running and burning power. Measured over the first 90 runs: 29 of
+   // them sampled under 90% of their elapsed time, worst 5.4% (barnes 8c 2P+6E /
+   // max_resources), and the shortfall was biased -- max_resources averaged 80.4%
+   // coverage against dynamic_rf's 91.8%, so the baseline arm was measured worse than
+   // the treatment. Without this the whole-run power is an average over the sampled
+   // prefix, extrapolated across the full elapsed time by the analysis.
+   void finalPowerSample();
+   // Shared body of the two above; now_ns is the end of the window being closed.
+   void emitPowerSample(UInt64 now_ns);
 
    // Path of the .features.json sidecar mcpat.py wrote for the most recent power
    // sample, and the values parsed out of it. The model was trained with the previous

@@ -174,6 +174,12 @@ void Simulator::start()
          ReconfigurationManager::reconfigHookCallback,
          (UInt64)ReconfigurationManager::getInstance(),
          HooksManager::ORDER_ACTION);
+      // The reconfiguration tick runs on core 0 only, so the McPAT window chain stops
+      // wherever core 0 stops. Close it at ROI end so the samples tile the whole run.
+      m_hooks_manager->registerHook(HookType::HOOK_ROI_END,
+         ReconfigurationManager::roiEndCallback,
+         (UInt64)ReconfigurationManager::getInstance(),
+         HooksManager::ORDER_ACTION);
    }
 
    if (m_trace_manager)

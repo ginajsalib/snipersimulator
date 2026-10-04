@@ -298,8 +298,42 @@ void ReconfigurationManager::writeLiveConfigSnapshot()
 void ReconfigurationManager::triggerPowerSample()
 {
    UInt64 elapsed_fs = m_prev.empty() ? 0 : m_prev[0].elapsed_time_fs;
-   UInt64 now_ns = elapsed_fs / 1000000ULL;
+   emitPowerSample(elapsed_fs / 1000000ULL);
+}
 
+SInt64 ReconfigurationManager::roiEndCallback(UInt64 arg, UInt64 /* unused */)
+{
+   ((ReconfigurationManager*)arg)->finalPowerSample();
+   return 0;
+}
+
+void ReconfigurationManager::finalPowerSample()
+{
+   // The run ends when the LAST core stops, not when core 0 does -- reading core 0's
+   // stale snapshot here would reproduce exactly the gap this is meant to close.
+   UInt64 end_fs = 0;
+   UInt32 total_cores = Sim()->getConfig()->getTotalCores();
+   for (core_id_t c = 0; c < (core_id_t)total_cores; c++)
+   {
+      UInt64 t = readMetric("performance_model", c, "elapsed_time");
+      if (t > end_fs)
+         end_fs = t;
+   }
+
+   UInt64 end_ns = end_fs / 1000000ULL;
+   if (end_ns <= m_prev_time_marker_ns)
+      return;   // the last tick already reached the end; nothing left to cover
+
+   fprintf(stderr, "[reconfig] final power sample: closing %llu -> %llu ns (%llu ns, %.1f%% of the run)\n",
+      (unsigned long long)m_prev_time_marker_ns, (unsigned long long)end_ns,
+      (unsigned long long)(end_ns - m_prev_time_marker_ns),
+      end_ns ? 100.0 * (end_ns - m_prev_time_marker_ns) / end_ns : 0.0);
+
+   emitPowerSample(end_ns);
+}
+
+void ReconfigurationManager::emitPowerSample(UInt64 now_ns)
+{
    char marker_buf[32];
    snprintf(marker_buf, sizeof(marker_buf), "%llu", (unsigned long long)now_ns);
    std::string this_marker(marker_buf);
