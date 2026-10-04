@@ -219,6 +219,8 @@ CacheCntlr::CacheCntlr(MemComponent::component_t mem_component,
 
    bzero(&stats, sizeof(stats));
 
+   registerStatsMetric(name, core_id, "reconfig-flush-reads", &stats.reconfig_flush_reads);
+   registerStatsMetric(name, core_id, "reconfig-flush-writebacks", &stats.reconfig_flush_writebacks);
    registerStatsMetric(name, core_id, "loads", &stats.loads);
    registerStatsMetric(name, core_id, "stores", &stats.stores);
    registerStatsMetric(name, core_id, "load-misses", &stats.load_misses);
@@ -2368,10 +2370,12 @@ CacheCntlr::reconfigure(UInt64 new_capacity_bytes)
 	if (effective_ways != old_ways)
 	{
 		// Base cost is the fixed control-plane/power-gating overhead. Under shrink_policy
-		// = flush there is also a data cost; the bulk of it (writebacks to the next level
-		// / DRAM, back-invalidations) is already charged through the normal memory model
-		// by flushWaysForReconfig(), so the per-line knobs below default to 0 to avoid
-		// double-counting, and exist for studying an explicit additional flush overhead.
+		// = flush there is also a data cost: flushWaysForReconfig() now accumulates the
+		// back-invalidation snoop latency and the DRAM writeback latency and charges them
+		// through the normal memory model (it previously discarded both, making a flush of
+		// millions of lines cost nothing but the fixed penalty below). The per-line knobs
+		// therefore default to 0 to avoid double-counting; set them non-zero only to study
+		// an ADDITIONAL explicit overhead on top of the modelled traffic.
 		UInt64 penalty_cycles = Sim()->getCfg()->getIntArray("reconfig/transition_penalty_cycles", m_core_id);
 		if (flushed)
 		{
@@ -2400,6 +2404,12 @@ CacheCntlr::flushWaysForReconfig(UInt32 target_ways, UInt32 old_ways,
 	Cache *cache = m_master->m_cache;
 	ShmemPerfModel::Thread_t thread_num = ShmemPerfModel::_USER_THREAD;
 	flushed = dirty_flushed = 0;
+	// Snoop + writeback latency for the lines we evict. updateCacheBlock() already returns
+	// the max over the previous levels for a single line; a bulk flush issues them one
+	// after another, so they sum. Charging this is NOT optional: without it the entire
+	// flush is free and shrink_policy=flush measures the benefit of a real shrink against
+	// none of its cost (barnes once evicted 3.1M lines and got *faster* than clamp).
+	SubsecondTime flush_latency = SubsecondTime::Zero();
 
 	for (UInt32 set_index = 0; set_index < cache->getNumSets(); set_index++)
 	{
@@ -2418,7 +2428,11 @@ CacheCntlr::flushWaysForReconfig(UInt32 target_ways, UInt32 old_ways,
 				// back-invalidates every previous level (rewriting the reason to
 				// BACK_INVAL for them), writes MODIFIED data into the next level, then
 				// invalidates locally and notifies the next level of the evict.
-				updateCacheBlock(addr, CacheState::INVALID, Transition::EVICT, NULL, thread_num);
+				flush_latency += updateCacheBlock(addr, CacheState::INVALID, Transition::EVICT, NULL, thread_num).first;
+				// Mirrors insertCacheBlock()'s eviction tail. A no-op unless
+				// ENABLE_TRACK_SHARING_PREVCACHES is defined, but omitting it would
+				// silently leave the next level's sharer list stale if it ever is.
+				m_next_cache_cntlr->notifyPrevLevelEvict(m_core_id_master, m_mem_component, addr);
 			}
 			else
 			{
@@ -2426,7 +2440,7 @@ CacheCntlr::flushWaysForReconfig(UInt32 target_ways, UInt32 old_ways,
 				// needs a buffer to hand it back, and the directory must be told --
 				// mirroring insertCacheBlock()'s eviction tail.
 				Byte evict_buf[getCacheBlockSize()];
-				updateCacheBlock(addr, CacheState::INVALID, Transition::EVICT, evict_buf, thread_num);
+				flush_latency += updateCacheBlock(addr, CacheState::INVALID, Transition::EVICT, evict_buf, thread_num).first;
 
 				if (m_master->m_dram_cntlr)
 				{
@@ -2436,6 +2450,7 @@ CacheCntlr::flushWaysForReconfig(UInt32 target_ways, UInt32 old_ways,
 						SubsecondTime dram_latency;
 						boost::tie<HitWhere::where_t, SubsecondTime>(hit_where, dram_latency) =
 							accessDRAM(Core::WRITE, addr, false, evict_buf);
+						flush_latency += dram_latency;
 					}
 				}
 				else
@@ -2451,10 +2466,26 @@ CacheCntlr::flushWaysForReconfig(UInt32 target_ways, UInt32 old_ways,
 				}
 			}
 
+			// Energy accounting: we read the line out of this cache, and if it was dirty the
+			// next level absorbed a write. Demand loads/stores are deliberately untouched.
+			stats.reconfig_flush_reads++;
+			if (was_modified && m_next_cache_cntlr)
+				m_next_cache_cntlr->stats.reconfig_flush_writebacks++;
+
 			flushed++;
 			if (was_modified)
 				dirty_flushed++;
 		}
+	}
+
+	// Charge it once, the way the normal eviction path does at insertCacheBlock().
+	// NOTE: this still omits DRAM writeback-buffer occupancy (m_dram_outstanding_writebacks),
+	// which the normal LLC eviction path models -- a flush of many dirty lines would in
+	// reality queue behind a finite number of evict buffers. Flush cost remains optimistic.
+	if (flush_latency > SubsecondTime::Zero())
+	{
+		getMemoryManager()->incrElapsedTime(flush_latency, thread_num);
+		atomic_add_subsecondtime(stats.snoop_latency, flush_latency);
 	}
 }
 

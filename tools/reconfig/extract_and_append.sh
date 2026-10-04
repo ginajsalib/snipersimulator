@@ -111,6 +111,11 @@ python3 parseInputConfigsOnPerf.py        "$WORK/perf.csv"    "$WORK/parsed.csv"
 python3 deleteEmptyRows.py                "$WORK/parsed.csv"  "$WORK/clean.csv"
 python3 mergePerfAndPower.py              "$WORK/clean.csv"   "$WORK/power.csv" "$WORK/merged.csv"
 python3 addCalculatedColumnsToMergedCsv.py "$WORK/merged.csv" "$WORK/new_full.csv"
+# Stage scripts have historically printed an error and returned normally, so verify the
+# artefact exists rather than trusting the exit status.
+for f in parsed.csv clean.csv merged.csv new_full.csv; do
+  [ -s "$WORK/$f" ] || { echo "stage 1 produced no $f -- see the output above" >&2; exit 1; }
+done
 
 echo
 echo "--- stage 2: append only rows not already present ---"

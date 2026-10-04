@@ -234,6 +234,11 @@ namespace ParametricDramDirectoryMSI
                   // accessing/evicting the line so *_prefetch statistics should be summed across the shared cache
            UInt64 evict[CacheState::NUM_CSTATE_STATES];
            UInt64 backinval[CacheState::NUM_CSTATE_STATES];
+           // Array accesses caused by shrink_policy=flush, kept apart from loads/stores so
+           // the RF model's hit-rate features stay demand-only. tools/mcpat.py folds them
+           // into this level's read/write access counts so the flush costs real energy.
+           UInt64 reconfig_flush_reads;      // lines read out of THIS cache when gating ways
+           UInt64 reconfig_flush_writebacks; // dirty lines written INTO this cache by the level above
            UInt64 hits_warmup, evict_warmup, invalidate_warmup;
            SubsecondTime total_latency;
            SubsecondTime snoop_latency;

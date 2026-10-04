@@ -455,6 +455,23 @@ def edit_XML(statsobj, stats, cfg):
   #stores = long(stats['L1-D.stores'])
 #---------------------------
 
+  # shrink_policy=flush evicts whole ways at a reconfiguration boundary. That traffic goes
+  # through updateCacheBlock()/writeCacheBlock(), which never touch stats.loads/stores, so
+  # without this the flush would cost McPAT nothing. Fold the dedicated counters into the
+  # access counts McPAT bills for, leaving the demand-only loads/stores the RF model reads
+  # untouched in sim.stats itself (this edits our in-memory copy only).
+  for _l in (2, 3):
+    for _base, _extra in (('loads', 'reconfig-flush-reads'),
+                          ('stores', 'reconfig-flush-writebacks')):
+      _k = 'L%d.%s' % (_l, _base)
+      _e = 'L%d.%s' % (_l, _extra)
+      if _k in stats and _e in stats:
+        _b, _x = stats[_k], stats[_e]
+        if isinstance(_b, list) and isinstance(_x, list) and len(_b) == len(_x):
+          stats[_k] = [a + b for a, b in zip(_b, _x)]
+        elif not isinstance(_b, list) and not isinstance(_x, list):
+          stats[_k] = _b + _x
+
   cycles_scale = stats['fs_to_cycles_cores']
   clock_core = float(sniper_config.get_config(cfg, 'perf_model/core/frequency', 0))*1000
   for core in range(ncores):

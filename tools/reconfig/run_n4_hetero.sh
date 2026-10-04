@@ -37,6 +37,14 @@ SHRINK_POLICY="${SHRINK_POLICY:-clamp}"
 # works under both since the tick was added to RobPerformanceModel. Set to "interval"
 # to reproduce the older runs.
 CORE_MODEL="${CORE_MODEL:-rob}"
+# Topology: CORES total, the first PERF_CORES of them "performance", the rest
+# "efficient". Defaults reproduce the original 4-core 2P+2E runs exactly.
+CORES="${CORES:-4}"
+PERF_CORES="${PERF_CORES:-2}"
+# Distinguishes result directories per topology; empty for the original 2P+2E so
+# existing paths are unchanged.
+if [ "$CORES" = "4" ] && [ "$PERF_CORES" = "2" ]; then TOPO_TAG=""
+else TOPO_TAG="_${CORES}c_${PERF_CORES}P$((CORES - PERF_CORES))E"; fi
 BENCH="${1:?usage: run_n4_hetero.sh <benchmark> <arm>}"
 ARM="${2:?usage: run_n4_hetero.sh <benchmark> <arm>}"
 
@@ -129,10 +137,17 @@ num_entries = $7
 EOF
 }
 
-write_core_cfg "$CFG_DIR/hc0.cfg" $FREQ_PERF $DISPATCH_PERF $WINDOW_PERF $L1D_PERF $L2_PERF $BTB_PERF $PF_PERF
-write_core_cfg "$CFG_DIR/hc1.cfg" $FREQ_PERF $DISPATCH_PERF $WINDOW_PERF $L1D_PERF $L2_PERF $BTB_PERF $PF_PERF
-write_core_cfg "$CFG_DIR/hc2.cfg" $FREQ_EFF  $DISPATCH_EFF  $WINDOW_EFF  $L1D_EFF  $L2_EFF  $BTB_EFF  $PF_EFF
-write_core_cfg "$CFG_DIR/hc3.cfg" $FREQ_EFF  $DISPATCH_EFF  $WINDOW_EFF  $L1D_EFF  $L2_EFF  $BTB_EFF  $PF_EFF
+HC_LIST=""
+i=0
+while [ "$i" -lt "$CORES" ]; do
+  if [ "$i" -lt "$PERF_CORES" ]; then
+    write_core_cfg "$CFG_DIR/hc${i}.cfg" $FREQ_PERF $DISPATCH_PERF $WINDOW_PERF $L1D_PERF $L2_PERF $BTB_PERF $PF_PERF
+  else
+    write_core_cfg "$CFG_DIR/hc${i}.cfg" $FREQ_EFF  $DISPATCH_EFF  $WINDOW_EFF  $L1D_EFF  $L2_EFF  $BTB_EFF  $PF_EFF
+  fi
+  HC_LIST="${HC_LIST}${HC_LIST:+,}hc${i}"
+  i=$((i + 1))
+done
 
 # dynamic_rf drives the real model through the host bridge; every other arm holds its
 # starting config via noop_predict.py, which runs directly in-container.
@@ -146,7 +161,7 @@ fi
 # RESULTS_ROOT lets a second pass (e.g. a longer --icount) write to a separate
 # tree instead of colliding with, and being skipped by, the first pass.
 RESULTS_ROOT="${RESULTS_ROOT:-$SNIPER_ROOT/results/n4_hetero}"
-OUTDIR=$RESULTS_ROOT/$BENCH/$ARM
+OUTDIR=$RESULTS_ROOT/$BENCH$TOPO_TAG/$ARM
 # McPAT never overwrites power-* files (unique t0/t1 per interval), so a re-run into a
 # dirty directory silently mixes two runs' samples. Only decisions.csv self-truncates.
 rm -rf "$OUTDIR"
@@ -155,8 +170,8 @@ mkdir -p "$OUTDIR"
 ROB_CFG=""
 [ "$CORE_MODEL" = "rob" ] && ROB_CFG="-c rob"
 
-/root/benchmarks/run-sniper --benchmarks "splash2-${BENCH}-${INPUT}-4" -n 4 -c gainestown $ROB_CFG \
-  -c hc0,hc1,hc2,hc3 \
+/root/benchmarks/run-sniper --benchmarks "splash2-${BENCH}-${INPUT}-${CORES}" -n "$CORES" -c gainestown $ROB_CFG \
+  -c "$HC_LIST" \
   -s stop-by-icount:$ICOUNT \
   -d "$OUTDIR" \
   -g perf_model/branch_predictor/num_ways=4 \
@@ -175,7 +190,7 @@ ROB_CFG=""
   -greconfig/live_config_path="$OUTDIR/sniper_reconfig_live.cfg"
 
 echo
-echo "=== $BENCH / $ARM (input=$INPUT, core=$CORE_MODEL) done -> $OUTDIR ==="
+echo "=== $BENCH / $ARM (input=$INPUT, core=$CORE_MODEL, ${CORES}c ${PERF_CORES}P$((CORES-PERF_CORES))E) done -> $OUTDIR ==="
 echo "per-core config actually applied (check the [] arrays are 4 wide and asymmetric):"
 grep -E "^(frequency|dispatch_width|window_size|cache_size|num_entries|prefetcher)" "$OUTDIR/sim.cfg" | head -20
 echo "failed predictions (must be 0 for dynamic_rf):"

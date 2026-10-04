@@ -28,6 +28,9 @@ ICOUNT=1000000000
 DRYRUN=0
 INPUT=small
 CORE_MODEL=rob
+CORES=4
+PERF_CORES=2
+SHRINK_POLICY=clamp
 TAG=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -36,6 +39,9 @@ while [ $# -gt 0 ]; do
     --icount) ICOUNT="$2"; shift 2 ;;
     --input) INPUT="$2"; shift 2 ;;
     --core-model) CORE_MODEL="$2"; shift 2 ;;
+    --cores) CORES="$2"; shift 2 ;;
+    --perf-cores) PERF_CORES="$2"; shift 2 ;;
+    --shrink-policy) SHRINK_POLICY="$2"; shift 2 ;;
     --tag) TAG="_$2"; shift 2 ;;
     --dry-run) DRYRUN=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
@@ -57,10 +63,24 @@ RESULTS_ROOT=$SNIPER_ROOT/results/n4_hetero$TAG
 export RESULTS_ROOT
 STATUS=$RESULTS_ROOT/sweep_status.csv
 mkdir -p "$(dirname "$STATUS")"
-[ -f "$STATUS" ] || echo "benchmark,arm,input,outcome,intervals,note" > "$STATUS"
+# The shrink policy is NOT a column in sweep_status.csv -- it is a property of the whole
+# results root. Mixing two policies into one tree would make it unreadable, so refuse.
+if [ -f "$RESULTS_ROOT/shrink_policy.txt" ] && [ "$(cat "$RESULTS_ROOT/shrink_policy.txt")" != "$SHRINK_POLICY" ]; then
+  echo "ERROR: $RESULTS_ROOT was built with shrink_policy=$(cat "$RESULTS_ROOT/shrink_policy.txt")," >&2
+  echo "       refusing to mix $SHRINK_POLICY into it. Use --tag to pick a separate root." >&2
+  exit 1
+fi
+[ -f "$STATUS" ] || echo "benchmark,topology,arm,input,outcome,intervals,note" > "$STATUS"
 
-already_ok () {  # $1=bench $2=arm -- already recorded as ok?
-  grep -qE "^$1,$2,[^,]*,ok," "$STATUS" 2>/dev/null
+# Topology is part of the key: without it an 8-core run would be skipped because the
+# 4-core run of the same benchmark/arm was recorded as ok.
+TOPO="${CORES}c_${PERF_CORES}P$((CORES-PERF_CORES))E"
+# Rows written before the topology column existed are 6-wide and are all 4c_2P2E runs,
+# so they must still count as done for the default topology -- otherwise this re-runs
+# every pair the earlier sweeps already completed.
+already_ok () {  # $1=bench $2=arm
+  grep -qE "^$1,$TOPO,$2,[^,]*,ok," "$STATUS" 2>/dev/null && return 0
+  [ "$TOPO" = "4c_2P2E" ] && grep -qE "^$1,$2,[^,]*,ok," "$STATUS" 2>/dev/null
 }
 
 echo "benchmarks: $BENCHMARKS"
@@ -68,8 +88,11 @@ echo "arms      : $ARMS"
 echo "icount    : $ICOUNT"
 echo "input     : $INPUT"
 echo "core model: $CORE_MODEL"
+echo "topology  : ${CORES} cores, ${PERF_CORES}P + $((CORES-PERF_CORES))E"
+echo "shrink    : $SHRINK_POLICY"
 echo "results   : $RESULTS_ROOT"
 [ "$DRYRUN" = "1" ] && { echo "(dry run -- nothing executed)"; exit 0; }
+echo "$SHRINK_POLICY" > "$RESULTS_ROOT/shrink_policy.txt"
 
 for bench in $BENCHMARKS; do
   for arm in $ARMS; do
@@ -82,21 +105,22 @@ for bench in $BENCHMARKS; do
     echo "== $bench / $arm   ($(date '+%F %T'))"
     echo "======================================================================"
 
-    if ICOUNT=$ICOUNT INPUT=$INPUT CORE_MODEL=$CORE_MODEL bash "$SNIPER_ROOT/tools/reconfig/run_n4_hetero.sh" "$bench" "$arm"; then
-      d=$RESULTS_ROOT/$bench/$arm
+    if ICOUNT=$ICOUNT INPUT=$INPUT CORE_MODEL=$CORE_MODEL CORES=$CORES PERF_CORES=$PERF_CORES SHRINK_POLICY=$SHRINK_POLICY bash "$SNIPER_ROOT/tools/reconfig/run_n4_hetero.sh" "$bench" "$arm"; then
+      if [ "$CORES" = "4" ] && [ "$PERF_CORES" = "2" ]; then tt=""; else tt="_${CORES}c_${PERF_CORES}P$((CORES-PERF_CORES))E"; fi
+      d=$RESULTS_ROOT/$bench$tt/$arm
       n=$(ls "$d"/power-*.txt 2>/dev/null | wc -l)
       # A run that segfaults still leaves power files behind, so completion is judged by
       # sim.out existing (written only on a clean exit) -- see the no_change crash, which
       # produced 179 power files but no sim.out and no roi-end marker.
       if [ -f "$d/sim.out" ]; then
-        echo "$bench,$arm,$INPUT,ok,$n," >> "$STATUS"
+        echo "$bench,$TOPO,$arm,$INPUT,ok,$n," >> "$STATUS"
         echo "-> ok ($n intervals)"
       else
-        echo "$bench,$arm,$INPUT,crashed,$n,no sim.out (check debug_backtrace.out)" >> "$STATUS"
+        echo "$bench,$TOPO,$arm,$INPUT,crashed,$n,no sim.out (check debug_backtrace.out)" >> "$STATUS"
         echo "-> CRASHED after $n intervals, continuing"
       fi
     else
-      echo "$bench,$arm,$INPUT,failed,0,run-sniper returned nonzero" >> "$STATUS"
+      echo "$bench,$TOPO,$arm,$INPUT,failed,0,run-sniper returned nonzero" >> "$STATUS"
       echo "-> FAILED to run, skipping"
     fi
   done
