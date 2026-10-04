@@ -36,6 +36,27 @@ done
 
 ROOT=$SNIPER_ROOT/results/shrink_policy_ab
 mkdir -p "$ROOT"
+
+# NOT "python3": /usr/bin/python3 in this container is a symlink to .reconfig_bridge_shim.sh,
+# so invoking it does a bridge handshake instead of running the script.
+PY3=/opt/rh/rh-python36/root/usr/bin/python3.6
+# Written to a file rather than fed to python on stdin from inside $( ): CentOS 6 has bash
+# 4.1, which cannot parse a here-document inside a command substitution (bash 4.2 fixed it).
+# The host's bash 5.x accepts it, so the breakage only ever showed up in the container.
+COUNT_TRANSITIONS=$ROOT/.count_transitions.py
+cat > "$COUNT_TRANSITIONS" <<'PY'
+import csv, sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+prev = [c for c in (rows[0] if rows else {}) if '_prev' in c]
+n = 0
+last = None
+for r in rows:
+    cur = tuple(r[c] for c in prev)
+    if last is not None and cur != last:
+        n += 1
+    last = cur
+print(n)
+PY
 STATUS=$ROOT/status.csv
 [ -f "$STATUS" ] || echo "benchmark,policy,input,outcome,intervals,transitions,flush_lines,flush_dirty" > "$STATUS"
 
@@ -71,24 +92,9 @@ for bench in $BENCHMARKS; do
            | grep -o "[0-9]* lines" | grep -o "[0-9]*" | paste -sd+ | bc 2>/dev/null)
       fd=$(grep -o "([0-9]* dirty)" "$OUTDIR/run.log" 2>/dev/null \
            | grep -o "[0-9]*" | paste -sd+ | bc 2>/dev/null)
-      # NOT "python3": /usr/bin/python3 in this container is a symlink to
-      # .reconfig_bridge_shim.sh, so invoking it here does a bridge handshake instead of
-      # running the script -- which is why this column reported "?" on the first run.
-      PY3=/opt/rh/rh-python36/root/usr/bin/python3.6
-      tr=$($PY3 - "$OUTDIR/sniper_reconfig_decisions.csv" <<'PY' 2>/dev/null
-import csv,sys
-rows=list(csv.DictReader(open(sys.argv[1])))
-prev=[c for c in (rows[0] if rows else {}) if '_prev' in c]
-n=0; last=None
-for r in rows:
-    cur=tuple(r[c] for c in prev)
-    if last is not None and cur!=last: n+=1
-    last=cur
-print(n)
-PY
-)
-      echo "$bench,$policy,$INPUT,ok,$n,${tr:-?},${fl:-0},${fd:-0}" >> "$STATUS"
-      echo "-> ok: $n intervals, ${tr:-?} transitions, ${fl:-0} lines flushed (${fd:-0} dirty)"
+      ntrans=$("$PY3" "$COUNT_TRANSITIONS" "$OUTDIR/sniper_reconfig_decisions.csv" 2>/dev/null)
+      echo "$bench,$policy,$INPUT,ok,$n,${ntrans:-?},${fl:-0},${fd:-0}" >> "$STATUS"
+      echo "-> ok: $n intervals, ${ntrans:-?} transitions, ${fl:-0} lines flushed (${fd:-0} dirty)"
     else
       echo "$bench,$policy,$INPUT,failed,0,,," >> "$STATUS"
       echo "-> FAILED (no sim.out)"
