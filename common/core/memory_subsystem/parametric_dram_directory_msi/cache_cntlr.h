@@ -422,6 +422,11 @@ namespace ParametricDramDirectoryMSI
          // reconfig/shrink_policy = flush. Returns lines flushed / of which dirty.
          // Each eviction reuses the same coherence path insertCacheBlock() runs on every
          // normal capacity eviction -- NOT a parallel reimplementation.
+         // Charge a flush stall to every core this cache is shared with. Gating ways in a
+         // shared LLC removes them for all sharers at once, so billing only the controller
+         // we happen to hold (core 0, for the L3) would let the others evict for free.
+         // m_shared_cores == 1 for a private L2, where this is just the owning core.
+         void chargeFlushTimeToSharers(SubsecondTime latency, ShmemPerfModel::Thread_t thread_num);
          void flushWaysForReconfig(UInt32 target_ways, UInt32 old_ways,
                                    UInt64 &flushed, UInt64 &dirty_flushed);
          void reconfigurePrefetcher(String new_type, String configName);

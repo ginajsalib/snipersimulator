@@ -2399,6 +2399,22 @@ CacheCntlr::reconfigure(UInt64 new_capacity_bytes)
 }
 
 void
+CacheCntlr::chargeFlushTimeToSharers(SubsecondTime latency, ShmemPerfModel::Thread_t thread_num)
+{
+	if (latency <= SubsecondTime::Zero())
+		return;
+
+	// The sharing group is [m_core_id_master, m_core_id_master + m_shared_cores) --
+	// see the constructor's m_core_id_master = m_core_id - m_core_id % m_shared_cores.
+	for (core_id_t id = m_core_id_master; id < (core_id_t)(m_core_id_master + m_shared_cores); id++)
+	{
+		Core *core = Sim()->getCoreManager()->getCoreFromID(id);
+		if (core && core->getShmemPerfModel())
+			core->getShmemPerfModel()->incrElapsedTime(latency, thread_num);
+	}
+}
+
+void
 CacheCntlr::flushWaysForReconfig(UInt32 target_ways, UInt32 old_ways,
                                  UInt64 &flushed, UInt64 &dirty_flushed)
 {
@@ -2437,7 +2453,7 @@ CacheCntlr::flushWaysForReconfig(UInt32 target_ways, UInt32 old_ways,
 				m_next_cache_cntlr->notifyPrevLevelEvict(m_core_id_master, m_mem_component, addr);
 				if (snoop > SubsecondTime::Zero())
 				{
-					getMemoryManager()->incrElapsedTime(snoop, thread_num);
+					chargeFlushTimeToSharers(snoop, thread_num);
 					snoop_total += snoop;
 				}
 			}
@@ -2450,7 +2466,7 @@ CacheCntlr::flushWaysForReconfig(UInt32 target_ways, UInt32 old_ways,
 				SubsecondTime snoop = updateCacheBlock(addr, CacheState::INVALID, Transition::EVICT, evict_buf, thread_num).first;
 				if (snoop > SubsecondTime::Zero())
 				{
-					getMemoryManager()->incrElapsedTime(snoop, thread_num);
+					chargeFlushTimeToSharers(snoop, thread_num);
 					snoop_total += snoop;
 				}
 
@@ -2473,7 +2489,7 @@ CacheCntlr::flushWaysForReconfig(UInt32 target_ways, UInt32 old_ways,
 						{
 							ScopedLock sl(getLock());
 							SubsecondTime t_issue = m_master->m_dram_outstanding_writebacks->getStartTime(t_now);
-							getMemoryManager()->incrElapsedTime(t_issue - t_now, thread_num);
+							chargeFlushTimeToSharers(t_issue - t_now, thread_num);
 						}
 
 						HitWhere::where_t hit_where;
