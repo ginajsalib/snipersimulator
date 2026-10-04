@@ -160,17 +160,29 @@ def main():
                    help='results root built with shrink_policy=clamp (also supplies max_resources)')
     p.add_argument('--flush-root', required=True,
                    help='results root built with shrink_policy=flush')
+    p.add_argument('--flush-priced-root', default=None,
+                   help='optional third root: shrink_policy=flush with non-zero '
+                        'reconfig/flush_penalty_cycles_* (a realistic DRAM write price)')
     p.add_argument('--benchmarks', default=None,
                    help='space-separated subset; default: everything present in both roots')
     p.add_argument('--csv', default=None, help='also write the full table here')
     args = p.parse_args()
 
+    # The marker records the policy AND the flush prices, so an unpriced and a priced
+    # flush tree are distinguishable -- they would otherwise look identical here.
     for root, want in ((args.clamp_root, 'clamp'), (args.flush_root, 'flush')):
         marker = os.path.join(root, 'shrink_policy.txt')
         if os.path.exists(marker):
             got = open(marker).read().strip()
-            if got != want:
-                sys.exit('ERROR: %s is a %s tree, expected %s' % (root, got, want))
+            if not got.startswith(want):
+                sys.exit('ERROR: %s is a "%s" tree, expected %s' % (root, got, want))
+    if args.flush_priced_root:
+        marker = os.path.join(args.flush_priced_root, 'shrink_policy.txt')
+        if os.path.exists(marker):
+            got = open(marker).read().strip()
+            if 'dirty_llc=0' in got and 'line=0' in got:
+                sys.exit('ERROR: %s has no flush price set (%s); it is the same experiment '
+                         'as --flush-root' % (args.flush_priced_root, got))
 
     wanted = set(args.benchmarks.split()) if args.benchmarks else None
     cells = []
@@ -184,6 +196,8 @@ def main():
             'clamp': os.path.join(args.clamp_root, dirname, 'dynamic_rf'),
             'max': os.path.join(args.clamp_root, dirname, 'max_resources'),
         }
+        if args.flush_priced_root:
+            arms['priced'] = os.path.join(args.flush_priced_root, dirname, 'dynamic_rf')
         got = {}
         for k, path in arms.items():
             m = measure(path)
@@ -199,13 +213,13 @@ def main():
            'IPS', 'W', 'E (J)', 'E+leak (J)', 'PPW', 'L2 got', 'L3 got', 'flush lines']
     rows = []
     for bench, topo, got in cells:
-        for arm in ('max', 'clamp', 'flush'):
+        for arm in ('max', 'clamp', 'flush', 'priced'):
             m = got.get(arm)
             if not m:
                 continue
             rows.append([
                 bench, topo, {'max': 'max_resources', 'clamp': 'dyn_rf clamp',
-                              'flush': 'dyn_rf flush'}[arm],
+                              'flush': 'dyn_rf flush', 'priced': 'dyn_rf flush+DRAM'}[arm],
                 '%.3f' % m['ipc'] if m['ipc'] else '--',
                 fmt_hr(m['L1-D']), fmt_hr(m['L2']), fmt_hr(m['L3']),
                 '%.3g' % m['ips'], '%.1f' % m['power'],
@@ -231,16 +245,19 @@ def main():
     print('flush vs clamp (dynamic_rf), and each vs max_resources')
     print('=' * 70)
     h2 = ['benchmark', 'topology', 'IPC f/c', 'L2hit f-c', 'IPS f/c', 'E f/c',
-          'PPW f/c', 'PPW clamp/max', 'PPW flush/max']
+          'PPW f/c', 'PPW clamp/max', 'PPW flush/max', 'E priced/f', 'PPW priced/max']
     r2 = []
     for bench, topo, got in cells:
         f, c, mx = got['flush'], got['clamp'], got.get('max')
         dl2 = ('%+.1f pp' % (100.0 * (f['L2'] - c['L2']))) \
             if (f['L2'] is not None and c['L2'] is not None) else '--'
+        pr = got.get('priced')
         r2.append([bench, topo, pct(f['ipc'], c['ipc']), dl2, pct(f['ips'], c['ips']),
                    pct(f['energy'], c['energy']), pct(f['ppw'], c['ppw']),
                    pct(c['ppw'], mx['ppw']) if mx else '--',
-                   pct(f['ppw'], mx['ppw']) if mx else '--'])
+                   pct(f['ppw'], mx['ppw']) if mx else '--',
+                   pct(pr['energy'], f['energy']) if pr else '--',
+                   pct(pr['ppw'], mx['ppw']) if (pr and mx) else '--'])
     w2 = [max(len(str(r[i])) for r in [h2] + r2) for i in range(len(h2))]
     l2 = lambda r: '  '.join(str(c).ljust(w2[i]) for i, c in enumerate(r))
     print(l2(h2))

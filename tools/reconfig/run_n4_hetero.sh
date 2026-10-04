@@ -31,6 +31,15 @@ INPUT="${INPUT:-small}"
 # SHRINK_POLICY: clamp (default, refuse shrinks that do not fit) | flush (evict the
 # ways being gated first). See config/base.cfg's [reconfig] section.
 SHRINK_POLICY="${SHRINK_POLICY:-clamp}"
+# Extra per-line price for a flush shrink, on top of what the memory model charges (which
+# for this machine is nearly nothing: clean lines are free, dirty L2 lines cost the 50-cycle
+# writeback_time, dirty L3 lines cost 0, and direct_access=false means the LLC evict-buffer
+# queue never runs). 0 = leave the simulator's own accounting alone. For a realistic DRAM
+# write use FLUSH_PEN_DIRTY_LLC=22 (64B at 7.6GB/s = 8.4ns at 2.66GHz, bandwidth-limited --
+# the right model for a bulk flush) or 120 for the pessimistic latency-limited bound (45ns).
+FLUSH_PEN_LINE="${FLUSH_PEN_LINE:-0}"
+FLUSH_PEN_DIRTY="${FLUSH_PEN_DIRTY:-0}"
+FLUSH_PEN_DIRTY_LLC="${FLUSH_PEN_DIRTY_LLC:-0}"
 # CORE_MODEL: rob (default) matches the core model the training sweep was collected
 # under (runSniperWithCfg.sh used -c rob) and supplies the seven rob_timer.uop_*
 # features the model was trained on, which do not exist under interval. Reconfiguration
@@ -183,6 +192,9 @@ ROB_CFG=""
   -g general/max_instructions=$ICOUNT \
   -g perf_model/l3_cache/cache_size=$L3_KB \
   -greconfig/shrink_policy=$SHRINK_POLICY \
+  -greconfig/flush_penalty_cycles_per_line=$FLUSH_PEN_LINE \
+  -greconfig/flush_penalty_cycles_per_dirty_line=$FLUSH_PEN_DIRTY \
+  -greconfig/flush_penalty_cycles_per_dirty_line_llc=$FLUSH_PEN_DIRTY_LLC \
   -greconfig/enabled=true \
   -greconfig/python_hook_script=$HOOK \
   -greconfig/mcpat_script_path=$SNIPER_ROOT/tools/mcpat.py \

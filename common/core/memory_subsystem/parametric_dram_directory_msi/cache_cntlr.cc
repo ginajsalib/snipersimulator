@@ -2376,14 +2376,27 @@ CacheCntlr::reconfigure(UInt64 new_capacity_bytes)
 		// DRAM write -- the same three steps insertCacheBlock() uses. It previously
 		// discarded every one of them, so a flush of millions of lines cost nothing but the
 		// fixed penalty below. The per-line knobs therefore default to 0 to avoid
-		// double-counting; set them non-zero only to study an ADDITIONAL explicit overhead.
+		// double-counting -- but note how little the memory model actually charges here:
+		// updateCacheBlock() returns writeback_time only for a line it had to write back,
+		// and gainestown sets writeback_time to 50 cycles at L2 and 0 at L3, while
+		// perf_model/dram/direct_access=false routes LLC evictions through the tag
+		// directory so accessDRAM() and the evict-buffer queue never run. A flush of a
+		// million clean lines is therefore still nearly free. The knobs below exist to
+		// put a physically meaningful price on that; see config/base.cfg.
 		UInt64 penalty_cycles = Sim()->getCfg()->getIntArray("reconfig/transition_penalty_cycles", m_core_id);
 		if (flushed)
 		{
 			UInt64 per_line = Sim()->getCfg()->hasKey("reconfig/flush_penalty_cycles_per_line")
 				? Sim()->getCfg()->getInt("reconfig/flush_penalty_cycles_per_line") : 0;
-			UInt64 per_dirty = Sim()->getCfg()->hasKey("reconfig/flush_penalty_cycles_per_dirty_line")
-				? Sim()->getCfg()->getInt("reconfig/flush_penalty_cycles_per_dirty_line") : 0;
+			// A dirty line evicted from an inner cache lands in the next cache; a dirty line
+			// evicted from the LAST level goes to DRAM. Those cost wildly different amounts,
+			// so they get separate knobs -- charging a DRAM write for an L2->L3 writeback
+			// would overstate the common case by an order of magnitude.
+			const char *dirty_key = m_next_cache_cntlr
+				? "reconfig/flush_penalty_cycles_per_dirty_line"
+				: "reconfig/flush_penalty_cycles_per_dirty_line_llc";
+			UInt64 per_dirty = Sim()->getCfg()->hasKey(dirty_key)
+				? Sim()->getCfg()->getInt(dirty_key) : 0;
 			penalty_cycles += flushed * per_line + dirty_flushed * per_dirty;
 		}
 		SubsecondTime penalty = ComponentLatency(Sim()->getDvfsManager()->getCoreDomain(m_core_id), penalty_cycles).getLatency();
