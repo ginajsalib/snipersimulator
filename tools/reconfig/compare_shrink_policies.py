@@ -37,7 +37,7 @@ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 import sniper_lib
 
 from analyze_final_experiment import (
-    find_power_files, parse_mcpat_txt, processor_power, compute_ppw,
+    power_windows, parse_mcpat_txt, processor_power, compute_ppw,
 )
 
 TOPO_SUFFIXES = (('_8c_2P6E', '8c 2P+6E'), ('_8c_4P4E', '8c 4P+4E'))
@@ -73,11 +73,13 @@ def hit_rates(results):
 
 def whole_run_power(resultsdir):
     """Time-weighted mean of the per-interval McPAT samples, dynamic and +leakage."""
-    files = find_power_files(resultsdir)
+    # power_windows() is find_power_files() with each duration taken from the stats
+    # snapshots rather than the filename -- the closing window's filename duration is
+    # inflated 2-3x, because it subtracts core 0's frozen clock from a live one. See
+    # analyze_final_experiment.snapshot_times_ns().
+    files = power_windows(resultsdir)
     if not files:
         return None, None
-    # find_power_files() yields (t0, t1, duration_ns, path); t0 may be the literal
-    # "roi-begin", so weight by the duration token rather than differencing t1-t0.
     dyn, leak, wsum = 0.0, 0.0, 0.0
     for t0, t1, dur_ns, path in files:
         dat = parse_mcpat_txt(path)

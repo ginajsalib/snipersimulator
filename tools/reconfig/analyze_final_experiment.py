@@ -140,6 +140,43 @@ def find_power_files(resultsdir):
     return out
 
 
+def power_windows(resultsdir):
+    """find_power_files(), with the CLOSING window's duration corrected.
+
+    emitPowerSample() writes each duration into the filename as (this marker - previous
+    marker), both read from core 0's performance_model.elapsed_time. For the interior
+    windows that is right: core 0 is running, so its delta is the window's length, and
+    those durations summed to ~100% of the run before finalPowerSample() existed.
+
+    The closing window is different. finalPowerSample() takes its end time as the max over
+    all cores -- it has to, because core 0 is exactly the core that has stopped -- so the
+    subtraction mixes two clocks and overstates itself badly: on fmm/max_resources the
+    filename claims 1,553,262,460 ns for a window that is really 467,190,300, and the
+    durations then sum to 294% of the run.
+
+    The windows themselves are exact; only this one number is wrong. So take the run's ROI
+    elapsed time from sniper_lib -- the same figure the analysis divides by -- and give the
+    closing window whatever is left after the interior ones. That makes the weights sum to
+    the run by construction, and costs one query, not one per window.
+    """
+    files = find_power_files(resultsdir)
+    if len(files) < 2:
+        return files
+    try:
+        res = sniper_lib.get_results(resultsdir=resultsdir)['results']
+        roi_ns = max(res['performance_model.elapsed_time']) / 1e6
+    except Exception:
+        return files
+    interior = sum(f[2] for f in files[:-1])
+    residual = roi_ns - interior
+    if residual <= 0:
+        # Interior windows already account for the whole run (core 0 ran to the end, so
+        # the closing sample covers nothing). Leave it alone rather than invent a value.
+        return files
+    t0, t1, _, path = files[-1]
+    return files[:-1] + [(t0, t1, int(residual), path)]
+
+
 def get_window_stats(resultsdir, t0, t1):
     """(total_instructions, elapsed_time_fs_of_core0) for one --partial-style
     window, via the same sniper_lib.get_results() mechanism tools/mcpat.py
@@ -274,7 +311,7 @@ def _fmt(x):
 
 def summarize_run(resultsdir, label=None, show_per_interval=False, quiet=False):
     label = label or resultsdir
-    power_files = find_power_files(resultsdir)
+    power_files = power_windows(resultsdir)
     if not power_files:
         print('[%s] WARNING: no power-*.txt files found in %s' % (label, resultsdir))
         return None
