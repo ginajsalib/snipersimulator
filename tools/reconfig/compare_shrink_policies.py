@@ -21,10 +21,22 @@ Metrics, all measured (no surrogate):
            folded in here (tools/mcpat.py folds them into the power model instead), so a
            flush never flatters its own hit rate.
   IPS      total instructions / elapsed seconds
-  power    McPAT Processor "Runtime Dynamic" over the run's power-*.txt samples
+  W dyn    McPAT Processor "Runtime Dynamic" over the run's power-*.txt samples
+  W tot    dynamic + "Subthreshold Leakage with power gating" + "Gate Leakage".
+           This is the one to read for a gating study. Way-gating shrinks the array
+           McPAT is handed (writeLiveConfigSnapshot writes cache_size AND associativity
+           from getActiveWays(), and mcpat.py sets power_gating=1), so the saving lands
+           entirely in leakage -- a dynamic-only figure cannot show it, and in fact moves
+           the wrong way, because a config that stops stalling retires more instructions
+           per second and so switches more. Measured over 42 cells, flush vs
+           max_resources: W dyn 1.99x (worse), leakage alone 0.63x (better in 42/42),
+           W tot 0.91x.
   energy   power * elapsed -- the per-job cost. Prefer this over power: the arms differ
            in runtime by up to 20x, and power is a rate.
-  PPW      ips**3 / power (the project definition; = 1/ED2P)
+  IPS/W    on both power figures.
+  PPW      ips**3 / power, on both. The dynamic-only form is the project/training
+           definition and is kept for continuity, but note it structurally cannot reward
+           power gating: gating moves power out of the only term the formula contains.
 """
 
 import argparse
@@ -137,7 +149,14 @@ def measure(resultsdir):
     t = elapsed_fs / 1e15
     m = dict(instrs=instrs, ipc=(float(instrs) / cycles if cycles else None),
              t=t, ips=ips, power=power, power_leak=power_leak,
-             energy=power * t, energy_leak=power_leak * t, ppw=ppw)
+             energy=power * t, energy_leak=power_leak * t, ppw=ppw,
+             # Leakage-inclusive forms. power_leak is already dynamic+leakage, so it is
+             # the total power; leak_only is broken out because it is the term the
+             # gating actually acts on.
+             leak_only=power_leak - power,
+             ips_per_w=(ips / power if power else None),
+             ips_per_w_tot=(ips / power_leak if power_leak else None),
+             ppw_tot=((ips ** 3) / power_leak if power_leak else None))
     m.update(hit_rates(res))
     m['flush_lines'] = flush_volume(resultsdir)
     m['l2_got'], m['l3_got'] = realized_shrink(resultsdir)
@@ -212,7 +231,9 @@ def main():
         sys.exit('No (benchmark, topology) had both a flush and a clamp dynamic_rf run.')
 
     hdr = ['benchmark', 'topology', 'arm', 'IPC', 'L1-D hit', 'L2 hit', 'L3 hit',
-           'IPS', 'W', 'E (J)', 'E+leak (J)', 'PPW', 'L2 got', 'L3 got', 'flush lines']
+           'IPS', 'W dyn', 'W leak', 'W tot', 'E dyn (J)', 'E tot (J)',
+           'IPS/W dyn', 'IPS/W tot', 'PPW dyn', 'PPW tot', 'L2 got', 'L3 got',
+           'flush lines']
     rows = []
     for bench, topo, got in cells:
         for arm in ('max', 'clamp', 'flush', 'priced'):
@@ -224,8 +245,11 @@ def main():
                               'flush': 'dyn_rf flush', 'priced': 'dyn_rf flush+DRAM'}[arm],
                 '%.3f' % m['ipc'] if m['ipc'] else '--',
                 fmt_hr(m['L1-D']), fmt_hr(m['L2']), fmt_hr(m['L3']),
-                '%.3g' % m['ips'], '%.1f' % m['power'],
-                '%.3f' % m['energy'], '%.3f' % m['energy_leak'], '%.3g' % m['ppw'],
+                '%.3g' % m['ips'], '%.1f' % m['power'], '%.1f' % m['leak_only'],
+                '%.1f' % m['power_leak'],
+                '%.3f' % m['energy'], '%.3f' % m['energy_leak'],
+                '%.3g' % m['ips_per_w'], '%.3g' % m['ips_per_w_tot'],
+                '%.3g' % m['ppw'], '%.3g' % m['ppw_tot'],
                 '--' if m['l2_got'] is None else '%.0f%%' % m['l2_got'],
                 '--' if m['l3_got'] is None else '%.0f%%' % m['l3_got'],
                 '--' if not m['flush_lines'] else '%d' % m['flush_lines'],
@@ -246,20 +270,25 @@ def main():
     print('=' * 70)
     print('flush vs clamp (dynamic_rf), and each vs max_resources')
     print('=' * 70)
-    h2 = ['benchmark', 'topology', 'IPC f/c', 'L2hit f-c', 'IPS f/c', 'E f/c',
-          'PPW f/c', 'PPW clamp/max', 'PPW flush/max', 'E priced/f', 'PPW priced/max']
+    h2 = ['benchmark', 'topology', 'IPC f/c', 'L2hit f-c', 'IPS f/c',
+          'Wtot f/c', 'Etot f/c', 'PPWtot f/c',
+          'PPWtot clamp/max', 'PPWtot flush/max', 'Etot priced/f', 'PPWtot priced/max']
     r2 = []
     for bench, topo, got in cells:
         f, c, mx = got['flush'], got['clamp'], got.get('max')
         dl2 = ('%+.1f pp' % (100.0 * (f['L2'] - c['L2']))) \
             if (f['L2'] is not None and c['L2'] is not None) else '--'
         pr = got.get('priced')
+        # Ratios are on the leakage-inclusive figures: those are what a gating change
+        # moves. The dynamic-only columns stay in the per-arm table above.
         r2.append([bench, topo, pct(f['ipc'], c['ipc']), dl2, pct(f['ips'], c['ips']),
-                   pct(f['energy'], c['energy']), pct(f['ppw'], c['ppw']),
-                   pct(c['ppw'], mx['ppw']) if mx else '--',
-                   pct(f['ppw'], mx['ppw']) if mx else '--',
-                   pct(pr['energy'], f['energy']) if pr else '--',
-                   pct(pr['ppw'], mx['ppw']) if (pr and mx) else '--'])
+                   pct(f['power_leak'], c['power_leak']),
+                   pct(f['energy_leak'], c['energy_leak']),
+                   pct(f['ppw_tot'], c['ppw_tot']),
+                   pct(c['ppw_tot'], mx['ppw_tot']) if mx else '--',
+                   pct(f['ppw_tot'], mx['ppw_tot']) if mx else '--',
+                   pct(pr['energy_leak'], f['energy_leak']) if pr else '--',
+                   pct(pr['ppw_tot'], mx['ppw_tot']) if (pr and mx) else '--'])
     w2 = [max(len(str(r[i])) for r in [h2] + r2) for i in range(len(h2))]
     l2 = lambda r: '  '.join(str(c).ljust(w2[i]) for i, c in enumerate(r))
     print(l2(h2))

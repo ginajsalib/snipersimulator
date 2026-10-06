@@ -348,6 +348,15 @@ def summarize_run(resultsdir, label=None, show_per_interval=False, quiet=False):
     power_run_leak = (sum(r['power_leakage_inclusive_w'] * r['duration_ns'] for r in agg) / total_dur
                        if total_dur else 0.0)
     ips_run, ppw_run = compute_ppw(whole_instrs, whole_elapsed_fs, power_run_dyn)
+    # Leakage-inclusive forms. Way-gating removes array, so its whole saving is in
+    # leakage; a dynamic-only figure cannot show it and in fact moves the wrong way,
+    # because a config that stops stalling switches more per second. Total power is
+    # dynamic + subthreshold (power-gated) + gate leakage, which is what
+    # processor_power(leakage_inclusive=True) already returns.
+    _, ppw_run_tot = compute_ppw(whole_instrs, whole_elapsed_fs, power_run_leak) \
+        if power_run_leak else (None, None)
+    ips_per_w_dyn = (ips_run / power_run_dyn) if power_run_dyn else None
+    ips_per_w_tot = (ips_run / power_run_leak) if power_run_leak else None
     energy_dyn_j = sum(r['power_dynamic_w'] * (r['duration_ns'] * 1e-9) for r in agg)
     energy_leak_j = sum(r['power_leakage_inclusive_w'] * (r['duration_ns'] * 1e-9) for r in agg)
 
@@ -366,6 +375,9 @@ def summarize_run(resultsdir, label=None, show_per_interval=False, quiet=False):
 
     ppw_values = [r['ppw'] for r in agg]
     summary = {
+        'ppw_run_total': ppw_run_tot,
+        'ips_per_w_dynamic': ips_per_w_dyn,
+        'ips_per_w_total': ips_per_w_tot,
         'label': label, 'resultsdir': resultsdir,
         'n_intervals': len(per_interval),
         'whole_run_instructions': whole_instrs,
@@ -405,10 +417,14 @@ def _print_summary(s, show_per_interval=False):
     print('  whole-run time (s):               %.4f' % (s['whole_run_time_s'] or 0))
     print('  whole-run IPS:                    %s' % _fmt(s['whole_run_ips']))
     print('  whole-run power, dynamic (W):     %.4f' % (s['whole_run_power_dynamic_w'] or 0))
-    print('  whole-run power, +leakage (W):    %.4f' % (s['whole_run_power_leakage_inclusive_w'] or 0))
+    print('  whole-run power, TOTAL (W):       %.4f   (dynamic + leakage -- read this one'
+          ' for a gating study)' % (s['whole_run_power_leakage_inclusive_w'] or 0))
     print('  whole-run energy, dynamic (J):    %.4f' % s['whole_run_energy_dynamic_j'])
     print('  whole-run energy, +leakage (J):   %.4f' % s['whole_run_energy_leakage_inclusive_j'])
-    print('  PPW (whole-run, dynamic power):   %s' % _fmt(s['ppw_run']))
+    print('  IPS per W (dynamic):              %s' % _fmt(s.get('ips_per_w_dynamic')))
+    print('  IPS per W (total):                %s' % _fmt(s.get('ips_per_w_total')))
+    print('  PPW (whole-run, dynamic power):   %s   (training definition)' % _fmt(s['ppw_run']))
+    print('  PPW (whole-run, TOTAL power):     %s' % _fmt(s.get('ppw_run_total')))
     print('  PPW per-interval: mean=%s median=%s p10=%s p90=%s min=%s max=%s' % (
         _fmt(s['per_interval_ppw_mean']), _fmt(s['per_interval_ppw_median']),
         _fmt(s['per_interval_ppw_p10']), _fmt(s['per_interval_ppw_p90']),
