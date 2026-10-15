@@ -142,12 +142,14 @@ def measure(resultsdir):
     instrs = _total(res, 'performance_model.instruction_count')
     cycles = _total(res, 'performance_model.cycle_count')
     elapsed_fs = max(res['performance_model.elapsed_time'])
+    n_intervals = len(power_windows(resultsdir))
     power, power_leak = whole_run_power(resultsdir)
     if not instrs or not power:
         return None
     ips, ppw = compute_ppw(instrs, elapsed_fs, power)
     t = elapsed_fs / 1e15
-    m = dict(instrs=instrs, ipc=(float(instrs) / cycles if cycles else None),
+    m = dict(instrs=instrs, intervals=n_intervals,
+             ipc=(float(instrs) / cycles if cycles else None),
              t=t, ips=ips, power=power, power_leak=power_leak,
              energy=power * t, energy_leak=power_leak * t, ppw=ppw,
              # Leakage-inclusive forms. power_leak is already dynamic+leakage, so it is
@@ -231,7 +233,7 @@ def main():
         sys.exit('No (benchmark, topology) had both a flush and a clamp dynamic_rf run.')
 
     hdr = ['benchmark', 'topology', 'arm', 'IPC', 'L1-D hit', 'L2 hit', 'L3 hit',
-           'IPS', 'W dyn', 'W leak', 'W tot', 'E dyn (J)', 'E tot (J)',
+           'intervals', 'IPS', 'W dyn', 'W leak', 'W tot', 'E dyn (J)', 'E tot (J)',
            'IPS/W dyn', 'IPS/W tot', 'PPW dyn', 'PPW tot', 'L2 got', 'L3 got',
            'flush lines']
     rows = []
@@ -245,6 +247,7 @@ def main():
                               'flush': 'dyn_rf flush', 'priced': 'dyn_rf flush+DRAM'}[arm],
                 '%.3f' % m['ipc'] if m['ipc'] else '--',
                 fmt_hr(m['L1-D']), fmt_hr(m['L2']), fmt_hr(m['L3']),
+                '%d' % m['intervals'],
                 '%.3g' % m['ips'], '%.1f' % m['power'], '%.1f' % m['leak_only'],
                 '%.1f' % m['power_leak'],
                 '%.3f' % m['energy'], '%.3f' % m['energy_leak'],

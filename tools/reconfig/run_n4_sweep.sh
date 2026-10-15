@@ -31,6 +31,7 @@ CORE_MODEL=rob
 CORES=4
 PERF_CORES=2
 SHRINK_POLICY=clamp
+RECONFIG_INTERVAL=1000000
 FLUSH_PEN_LINE=0
 FLUSH_PEN_DIRTY=0
 FLUSH_PEN_DIRTY_LLC=0
@@ -45,6 +46,7 @@ while [ $# -gt 0 ]; do
     --cores) CORES="$2"; shift 2 ;;
     --perf-cores) PERF_CORES="$2"; shift 2 ;;
     --shrink-policy) SHRINK_POLICY="$2"; shift 2 ;;
+    --interval-instructions) RECONFIG_INTERVAL="$2"; shift 2 ;;
     --flush-penalty-per-line)      FLUSH_PEN_LINE="$2";      shift 2 ;;
     --flush-penalty-per-dirty)     FLUSH_PEN_DIRTY="$2";     shift 2 ;;
     --flush-penalty-per-dirty-llc) FLUSH_PEN_DIRTY_LLC="$2"; shift 2 ;;
@@ -71,7 +73,7 @@ STATUS=$RESULTS_ROOT/sweep_status.csv
 mkdir -p "$(dirname "$STATUS")"
 # The shrink policy is NOT a column in sweep_status.csv -- it is a property of the whole
 # results root. Mixing two policies into one tree would make it unreadable, so refuse.
-POLICY_SIG="$SHRINK_POLICY line=$FLUSH_PEN_LINE dirty=$FLUSH_PEN_DIRTY dirty_llc=$FLUSH_PEN_DIRTY_LLC"
+POLICY_SIG="$SHRINK_POLICY line=$FLUSH_PEN_LINE dirty=$FLUSH_PEN_DIRTY dirty_llc=$FLUSH_PEN_DIRTY_LLC interval=$RECONFIG_INTERVAL"
 if [ -f "$RESULTS_ROOT/shrink_policy.txt" ] && [ "$(cat "$RESULTS_ROOT/shrink_policy.txt")" != "$POLICY_SIG" ]; then
   echo "ERROR: $RESULTS_ROOT was built with [$(cat "$RESULTS_ROOT/shrink_policy.txt")]," >&2
   echo "       refusing to mix [$POLICY_SIG] into it. Use --tag to pick a separate root." >&2
@@ -97,6 +99,7 @@ echo "input     : $INPUT"
 echo "core model: $CORE_MODEL"
 echo "topology  : ${CORES} cores, ${PERF_CORES}P + $((CORES-PERF_CORES))E"
 echo "shrink    : $SHRINK_POLICY (flush penalty cycles: line=$FLUSH_PEN_LINE dirty=$FLUSH_PEN_DIRTY dirty_llc=$FLUSH_PEN_DIRTY_LLC)"
+echo "interval  : $RECONFIG_INTERVAL instructions (core 0)"
 echo "results   : $RESULTS_ROOT"
 [ "$DRYRUN" = "1" ] && { echo "(dry run -- nothing executed)"; exit 0; }
 echo "$POLICY_SIG" > "$RESULTS_ROOT/shrink_policy.txt"
@@ -112,7 +115,7 @@ for bench in $BENCHMARKS; do
     echo "== $bench / $arm   ($(date '+%F %T'))"
     echo "======================================================================"
 
-    if ICOUNT=$ICOUNT INPUT=$INPUT CORE_MODEL=$CORE_MODEL CORES=$CORES PERF_CORES=$PERF_CORES SHRINK_POLICY=$SHRINK_POLICY FLUSH_PEN_LINE=$FLUSH_PEN_LINE FLUSH_PEN_DIRTY=$FLUSH_PEN_DIRTY FLUSH_PEN_DIRTY_LLC=$FLUSH_PEN_DIRTY_LLC bash "$SNIPER_ROOT/tools/reconfig/run_n4_hetero.sh" "$bench" "$arm"; then
+    if ICOUNT=$ICOUNT INPUT=$INPUT CORE_MODEL=$CORE_MODEL CORES=$CORES PERF_CORES=$PERF_CORES SHRINK_POLICY=$SHRINK_POLICY RECONFIG_INTERVAL=$RECONFIG_INTERVAL FLUSH_PEN_LINE=$FLUSH_PEN_LINE FLUSH_PEN_DIRTY=$FLUSH_PEN_DIRTY FLUSH_PEN_DIRTY_LLC=$FLUSH_PEN_DIRTY_LLC bash "$SNIPER_ROOT/tools/reconfig/run_n4_hetero.sh" "$bench" "$arm"; then
       if [ "$CORES" = "4" ] && [ "$PERF_CORES" = "2" ]; then tt=""; else tt="_${CORES}c_${PERF_CORES}P$((CORES-PERF_CORES))E"; fi
       d=$RESULTS_ROOT/$bench$tt/$arm
       n=$(ls "$d"/power-*.txt 2>/dev/null | wc -l)

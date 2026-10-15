@@ -37,6 +37,12 @@ SHRINK_POLICY="${SHRINK_POLICY:-clamp}"
 # queue never runs). 0 = leave the simulator's own accounting alone. For a realistic DRAM
 # write use FLUSH_PEN_DIRTY_LLC=22 (64B at 7.6GB/s = 8.4ns at 2.66GHz, bandwidth-limited --
 # the right model for a bulk flush) or 120 for the pessimistic latency-limited bound (45ns).
+# Instructions between reconfiguration decisions, counted on core 0 (the only core that
+# drives the tick). base.cfg's default is 1000000, which is also what the RF model was
+# TRAINED on -- halving it halves every delta feature the model sees, so a 500k run is
+# measuring finer granularity and out-of-distribution inputs together, not granularity
+# alone. It also doubles the number of McPAT invocations, and so the wall time.
+RECONFIG_INTERVAL="${RECONFIG_INTERVAL:-1000000}"
 FLUSH_PEN_LINE="${FLUSH_PEN_LINE:-0}"
 FLUSH_PEN_DIRTY="${FLUSH_PEN_DIRTY:-0}"
 FLUSH_PEN_DIRTY_LLC="${FLUSH_PEN_DIRTY_LLC:-0}"
@@ -191,6 +197,7 @@ ROB_CFG=""
   -g perf_model/l2_cache/prefetcher/simple/flows_per_core=false \
   -g general/max_instructions=$ICOUNT \
   -g perf_model/l3_cache/cache_size=$L3_KB \
+  -greconfig/interval_instructions=$RECONFIG_INTERVAL \
   -greconfig/shrink_policy=$SHRINK_POLICY \
   -greconfig/flush_penalty_cycles_per_line=$FLUSH_PEN_LINE \
   -greconfig/flush_penalty_cycles_per_dirty_line=$FLUSH_PEN_DIRTY \
@@ -202,7 +209,7 @@ ROB_CFG=""
   -greconfig/live_config_path="$OUTDIR/sniper_reconfig_live.cfg"
 
 echo
-echo "=== $BENCH / $ARM (input=$INPUT, core=$CORE_MODEL, ${CORES}c ${PERF_CORES}P$((CORES-PERF_CORES))E) done -> $OUTDIR ==="
+echo "=== $BENCH / $ARM (input=$INPUT, core=$CORE_MODEL, ${CORES}c ${PERF_CORES}P$((CORES-PERF_CORES))E, interval=${RECONFIG_INTERVAL}) done -> $OUTDIR ==="
 echo "per-core config actually applied (check the [] arrays are 4 wide and asymmetric):"
 grep -E "^(frequency|dispatch_width|window_size|cache_size|num_entries|prefetcher)" "$OUTDIR/sim.cfg" | head -20
 echo "failed predictions (must be 0 for dynamic_rf):"
