@@ -33,6 +33,7 @@ from matplotlib.ticker import MaxNLocator
 # Reference palette, light mode, slots in fixed order. Not cycled.
 C_P      = '#2a78d6'   # slot 1, blue   -> performance cores
 C_E      = '#eb6834'   # slot 2, orange -> efficiency cores
+C_3      = '#1baf7a'   # slot 3, aqua   -> third series in --compare
 INK      = '#0b0b0b'
 INK_2    = '#52514e'
 GRID     = '#e3e2de'
@@ -157,6 +158,54 @@ def plot_mpki(root, bench, outpath):
     return True
 
 
+def plot_compare(specs, bench, outpath):
+    """Overlay prefetcher-ON fraction and branch MPKI across several result trees.
+
+    Built for the v2/v4/v5 barnes question: the three runs differ only in how the
+    simulator handles BTB resizes, so any divergence in the PREFETCHER trace is the
+    model reacting to a perturbation that should have been neutral to it.
+    """
+    colours = [C_P, C_E, C_3]
+    fig, axes = plt.subplots(2, 1, figsize=(9, 6.4), sharex=True,
+                             gridspec_kw={'hspace': 0.33})
+    fig.patch.set_facecolor(SURFACE)
+    for ax in axes:
+        style(ax)
+
+    for (label, root), colour in zip(specs, colours):
+        p = os.path.join(root, bench, 'dynamic_rf', 'sniper_reconfig_decisions.csv')
+        if not os.path.exists(p):
+            print('skip %s (%s)' % (label, p), file=sys.stderr)
+            continue
+        rows, ncore = load(p)
+        x = [100.0 * i / (len(rows) - 1) for i in range(len(rows))]
+        on = [100.0 * sum(1 for c in range(ncore)
+                          if r['prefetch_new_core%d' % c] != 'none') / ncore
+              for r in rows]
+        mpki = [sum(float(r['branch_mpki_core%d' % c]) for c in range(ncore)) / ncore
+                for r in rows]
+        axes[0].plot(x, on, lw=2, color=colour, label=label, zorder=3)
+        axes[1].plot(x, mpki, lw=2, color=colour, label=label, zorder=3)
+
+    axes[0].set_title('L2 prefetcher enabled (% of cores)', loc='left',
+                      fontsize=10.5, color=INK, pad=6)
+    axes[0].set_ylim(-4, 104)
+    # Above the axes: the prefetcher trace saturates at 0 and 100, so any in-axes
+    # placement sits on top of data.
+    axes[0].legend(frameon=False, fontsize=9, labelcolor=INK_2, ncol=3,
+                   loc='lower left', bbox_to_anchor=(0, 1.12))
+    axes[1].set_title('branch MPKI (mean over cores)', loc='left',
+                      fontsize=10.5, color=INK, pad=6)
+    axes[1].set_xlabel('progress through run (%)', fontsize=10, color=INK_2)
+
+    fig.text(0.015, 0.975, '%s — effect of the BTB-resize fixes on the model\'s own decisions'
+             % bench, ha='left', va='top', fontsize=13, color=INK, weight='bold')
+    fig.subplots_adjust(left=0.085, right=0.975, top=0.845, bottom=0.095)
+    fig.savefig(outpath, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+    print('wrote %s' % outpath)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -164,9 +213,20 @@ def main():
     ap.add_argument('--benchmarks', default='water.sp barnes')
     ap.add_argument('--arm', default='dynamic_rf')
     ap.add_argument('--out', default='.')
+    ap.add_argument('--compare', default=None,
+                    help='semicolon-separated label=root pairs; overlays prefetcher '
+                         'and MPKI traces across trees instead of plotting knobs')
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
+
+    if args.compare:
+        specs = [tuple(p.split('=', 1)) for p in args.compare.split(';') if p]
+        for bench in args.benchmarks.split():
+            plot_compare(specs, bench,
+                         os.path.join(args.out, 'compare_%s.png' % bench))
+        return
+
     for bench in args.benchmarks.split():
         p = os.path.join(args.root, bench, args.arm, 'sniper_reconfig_decisions.csv')
         if not os.path.exists(p):
