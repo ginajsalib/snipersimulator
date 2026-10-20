@@ -948,9 +948,19 @@ void ReconfigurationManager::applyReconfiguration(const PredictedConfig& cfg)
             l3->reconfigure(cfg.l3_bytes);
       }
 
-      PerformanceModel *pm = core->getPerformanceModel();
-      if (pm && pm->getBranchPredictor())
-         pm->getBranchPredictor()->resizeBTB(pc.btb_entries);
-      m_current_btb_entries[core_id] = pc.btb_entries;
+      // Only resize when the size actually changes. PentiumMBranchTargetBuffer::resize()
+      // rebuilds every way from scratch and so drops all tags -- correct for a genuine
+      // resize, but calling it unconditionally flushed the BTB on EVERY interval whether
+      // or not the predictor asked for a different size. Measured over the 14 four-core
+      // runs: 12,472 resize calls, 8,637 of them (69%) with an unchanged size, which is
+      // pure cold-start penalty for nothing. barnes paid it 72% of the time and was the
+      // only benchmark the scheme made slower.
+      if (m_current_btb_entries[core_id] != pc.btb_entries)
+      {
+         PerformanceModel *pm = core->getPerformanceModel();
+         if (pm && pm->getBranchPredictor())
+            pm->getBranchPredictor()->resizeBTB(pc.btb_entries);
+         m_current_btb_entries[core_id] = pc.btb_entries;
+      }
    }
 }
