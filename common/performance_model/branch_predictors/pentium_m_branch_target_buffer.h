@@ -45,13 +45,33 @@ public:
         m_ways = std::vector<Way>(m_num_ways, Way(m_num_entries));
    }
 
-   // Runtime reconfiguration: rebuild with a new entries-per-way count. This drops all
-   // existing tags (matches the "cold-start penalty next interval" expectation), same as
-   // a real BTB flush on reconfiguration.
+   // Runtime reconfiguration: change the entries-per-way count, PRESERVING the entries
+   // that still fit. The previous implementation rebuilt m_ways wholesale, which wiped
+   // every tag even when the BTB was being made LARGER -- growing a buffer has no reason
+   // to discard what is already in it. std::vector::resize() keeps existing elements,
+   // value-initialises the new tail on a grow, and truncates on a shrink, which is the
+   // behaviour real hardware would have.
+   //
+   // Note how little is actually lost on a shrink here: IP_TO_INDEX is hardwired to 9
+   // bits, so every live entry sits at index 0..511, and every size in the sweep grid is
+   // >= 512. Truncating 4096 -> 1024 therefore discards only indices that were never
+   // written. See the addressing note at the top of this file.
    void resize(UInt32 new_entries)
    {
+      if (new_entries == m_num_entries)
+         return;
+
+      // Below 512 the 9-bit index would run off the end of the arrays. Nothing in the
+      // sweep grid goes there, but clamp rather than corrupt memory if it ever does.
+      if (new_entries < 512)
+         new_entries = 512;
+
+      for (UInt32 w = 0; w < m_num_ways; w++)
+      {
+         m_ways[w].m_tag_offset.resize(new_entries, 0);
+         m_ways[w].m_plru.resize(new_entries, 0);
+      }
       m_num_entries = new_entries;
-      m_ways = std::vector<Way>(m_num_ways, Way(m_num_entries));
    }
 
    bool predict(bool indirect, IntPtr ip, IntPtr target)
