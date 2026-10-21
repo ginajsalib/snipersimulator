@@ -51,13 +51,7 @@ SimplePrefetcher::getNextAddress(IntPtr current_address, core_id_t _core_id)
    std::vector<IntPtr> addresses;
    if (stride != 0)
    {
-      // i starts at 1, not 0. At i == 0 the "prefetch" address is current_address
-      // itself -- the line the access that triggered us is already fetching -- so one
-      // in every num_prefetches requests was guaranteed useless. With the configured
-      // num_prefetches = 4 that was 25% of all prefetch traffic, and this prefetcher
-      // issues 10-83 prefetches per demand L2 miss, so it mattered. (Present in
-      // upstream Sniper as of main@56505e4; not specific to this fork.)
-      for(unsigned int i = 1; i <= num_prefetches; ++i)
+      for(unsigned int i = 0; i < num_prefetches; ++i)
       {
          IntPtr prefetch_address = current_address + i * stride;
          // But stay within the page if requested
